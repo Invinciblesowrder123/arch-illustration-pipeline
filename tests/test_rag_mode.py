@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,11 +64,11 @@ class TestNormChunk(unittest.TestCase):
         })
         self.assertEqual(c["content"], "绿松石镶嵌")
         self.assertEqual(c["document_name"], "简报.pdf")
-        self.assertEqual(c["page"], 4)  # 非 0 页码视为已 1 基，原样保留
+        self.assertEqual(c["page"], 5)  # positions 为 0 基（源码核验），一律 +1
         self.assertAlmostEqual(c["similarity"], 0.55)
 
-    def test_positions_zero_based_page(self):
-        # 页码为 0 时按 0 基处理，+1 转为 1 基
+    def test_positions_first_page(self):
+        # 首页：positions 为 0 → 转为 1
         c = RAGFlowClient._norm_chunk({"content": "x", "positions": [[0, 1, 2, 3, 4]]})
         self.assertEqual(c["page"], 1)
 
@@ -92,7 +93,7 @@ class TestRetrieve(unittest.TestCase):
         self.assertEqual([c["content"] for c in chunks], ["高分片段", "低分片段"])
         payload = client._session.request.call_args.kwargs["json"]
         self.assertEqual(payload["dataset_ids"], ["ds1"])
-        self.assertEqual(payload["top_k"], 2)
+        self.assertEqual(payload["knn_top_k"], 2)  # v0.27 起改名为 knn_top_k
         self.assertEqual(payload["similarity_threshold"], 0.2)
 
     def test_business_error_raises(self):
@@ -436,27 +437,97 @@ class TestCheckLlmProbe(unittest.TestCase):
         self.assertEqual(fake.state["n"], 1)  # 非风控错误不重试
 
 
+class TestSearchPolicyAndReport(unittest.TestCase):
+    """回归：① 报告里的"组查询"数应来自检索规划（曾被联网搜索词覆盖，写成 3）；
+    ② rag 模式不得混入联网资料（会破坏「断言可溯源到文献页码」的引用原则）。"""
+
+    def _run(self, mode: str, tmp: Path, needs_search: bool):
+        import pipeline
+        import search
+
+        cfg = _fake_config(mode)
+        cfg.output_dir = tmp / "out"
+        cfg.knowledge_dir = tmp / "kn"
+        cfg.search_enabled = True
+
+        chunks = [{"content": "龙身呈匚形", "document_name": "发掘报告.pdf", "page": 3,
+                   "similarity": 0.9, "keywords": []}]
+        learned = {"knowledge_summary_md": "知识", "needs_search": needs_search,
+                   "search_queries": ["补搜1", "补搜2", "补搜3"], "illustration_spec": {},
+                   "image_prompt_zh": "中", "image_prompt_en": "en"}
+
+        fake_rf = MagicMock()
+        fake_rf.retrieve.return_value = chunks
+        web_hits = [{"query": "补搜1", "title": "t", "url": "http://x", "snippet": "s"}]
+
+        with patch.object(pipeline.knowledge, "plan_queries",
+                          return_value=["q1", "q2", "q3", "q4", "q5"]), \
+             patch.object(pipeline, "RAGFlowClient", return_value=fake_rf), \
+             patch.object(pipeline.knowledge, "learn", return_value=learned), \
+             patch.object(pipeline.generate, "generate_image",
+                          side_effect=lambda _k, _u, _m, _s, _p, path: Path(path).write_bytes(b"\x89PNG")), \
+             patch.object(pipeline.verify, "verify_image",
+                          return_value={"pass": True, "score": 9, "problems": [], "suggestions": ""}), \
+             patch.object(search, "web_search", return_value=web_hits) as mock_web, \
+             patch.object(search, "format_search_results", return_value="(搜索结果)"):
+            if mode == "local":
+                with patch.object(pipeline, "collect_references",
+                                  return_value=[{"name": "a.pdf", "ext": ".pdf", "chars": 10, "text": "t"}]):
+                    result = pipeline.run(cfg, "画龙形器")
+            else:
+                result = pipeline.run(cfg, "画龙形器")
+        return result, mock_web
+
+    def test_rag_report_counts_planned_queries(self):
+        with tempfile.TemporaryDirectory() as td:
+            result, mock_web = self._run("rag", Path(td), needs_search=True)
+            report = Path(result["report"]).read_text(encoding="utf-8")
+            self.assertIn("5 组查询", report)          # 修复前会显示 3（被搜索词覆盖）
+            self.assertIn("检索词: q1 / q2 / q3 / q4 / q5", report)
+
+    def test_rag_mode_does_not_use_web_search(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, mock_web = self._run("rag", Path(td), needs_search=True)
+            mock_web.assert_not_called()               # rag 模式不联网
+
+    def test_local_mode_still_uses_web_search(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, mock_web = self._run("local", Path(td), needs_search=True)
+            mock_web.assert_called_once()              # local 模式行为不变
+
+
 class TestConfigModeResolution(unittest.TestCase):
+    """注意：这两个用例必须屏蔽项目真实 .env（本机部署 RAGFlow 后 .env 已含
+    RAGFLOW_*，否则 load_config 会读到真实配置导致"应当报错"的用例失效）。"""
+
+    def _isolate(self):
+        import config as config_mod
+        for k in ("RAGFLOW_BASE_URL", "RAGFLOW_API_KEY", "RAGFLOW_DATASET_ID", "PIPELINE_MODE"):
+            os.environ.pop(k, None)
+        return patch.object(config_mod, "load_dotenv", lambda *a, **kw: None)
+
     def test_rag_requires_config(self):
         from config import ConfigError, load_config
-        with patch.dict("os.environ", {"PIPELINE_MODE": "rag"}, clear=False):
-            # 未配 RAGFLOW_* 时应报配置错误
-            import os
-            os.environ.pop("RAGFLOW_BASE_URL", None)
-            os.environ.pop("RAGFLOW_API_KEY", None)
-            os.environ.pop("RAGFLOW_DATASET_ID", None)
+        with self._isolate():
             with self.assertRaises(ConfigError):
-                load_config(mode="rag")
+                load_config(mode="rag", require_llm=False)
 
     def test_local_mode_without_ragflow_ok(self):
         from config import load_config
-        import os
-        os.environ.pop("RAGFLOW_BASE_URL", None)
-        os.environ.pop("RAGFLOW_API_KEY", None)
-        os.environ.pop("RAGFLOW_DATASET_ID", None)
-        with patch.dict("os.environ", {"PIPELINE_MODE": "local"}, clear=False):
-            cfg = load_config(mode=None)
+        with self._isolate(), patch.dict("os.environ", {"PIPELINE_MODE": "local"}, clear=False):
+            cfg = load_config(mode=None, require_llm=False)
         self.assertEqual(cfg.mode, "local")
+
+    def test_auto_mode_picks_rag_when_configured(self):
+        from config import load_config
+        with self._isolate(), patch.dict("os.environ", {
+            "RAGFLOW_BASE_URL": "http://ragflow.test",
+            "RAGFLOW_API_KEY": "sk-x",
+            "RAGFLOW_DATASET_ID": "ds-a;ds-b",
+        }, clear=False):
+            cfg = load_config(mode=None, require_llm=False)
+        self.assertEqual(cfg.mode, "rag")
+        self.assertEqual(cfg.ragflow_dataset_ids, ["ds-a", "ds-b"])
 
 
 if __name__ == "__main__":

@@ -66,17 +66,21 @@ class RAGFlowClient:
 
     @staticmethod
     def _norm_chunk(raw: dict) -> dict:
-        """把不同版本的 chunk 字段归一化。page 统一为 1 基整数或 None。"""
+        """把不同版本的 chunk 字段归一化。page 统一为 1 基整数或 None。
+
+        页码来源（已对照 RAGFlow v0.27.2 源码）：retrieval 返回的 chunk 里没有
+        page_number，页码在 positions 中，形如 [[page, x0, x1, y0, y1], ...]，
+        而 deepdoc 的 `PdfParser.extract_positions()` 生成时已做 `int(p) - 1`，
+        即 **0 基**。故此处一律 +1 转成 1 基页码（真机验证：命中片段 p.2/p.3 正确）。
+        """
         content = raw.get("content") or raw.get("content_with_weight") or ""
         doc_name = raw.get("document_name") or raw.get("document_keyword") or "未知文献"
         page = raw.get("page_number")
         if page is None:
             positions = raw.get("positions")
-            # positions 形如 [[page, x1, y1, x2, y2], ...]，page 可能 0 基
             if positions and isinstance(positions, list) and positions:
                 try:
-                    page = int(positions[0][0])
-                    page = page + 1 if page == 0 else page
+                    page = int(positions[0][0]) + 1  # positions 为 0 基
                 except (TypeError, ValueError, IndexError):
                     page = None
         try:
@@ -101,13 +105,19 @@ class RAGFlowClient:
         similarity_threshold: float = 0.2,
         page_size: int = 12,
     ) -> list[dict]:
-        """检索一个查询词，返回归一化片段列表（按相似度降序）。"""
+        """检索一个查询词，返回归一化片段列表（按相似度降序）。
+
+        参数名对照 v0.27.2 源码（api/apps/restful_apis/chunk_api.py）：
+        候选池参数已由 `top_k` 更名为 **`knn_top_k`**（旧名仍可用但服务端会记
+        deprecated 警告）。这里只发新名：新版本按新参数生效，老版本忽略未知字段
+        回落各自默认候选池，均不报错。返回片段数由 `page_size` 决定。
+        """
         if not dataset_ids:
             raise RagflowError("检索需要至少一个 dataset_id")
         payload = {
             "question": question,
             "dataset_ids": dataset_ids,
-            "top_k": top_k,
+            "knn_top_k": top_k,
             "similarity_threshold": similarity_threshold,
             "page_size": page_size,
         }

@@ -81,6 +81,8 @@ def _write_report(
             f"- 知识来源: RAGFlow 检索（{len(queries or [])} 组查询，"
             f"命中 {len(chunks or [])} 个片段、{len({c['document_name'] for c in (chunks or [])})} 篇文献）"
         )
+        if queries:
+            source_line += f"\n- 检索词: {' / '.join(queries)}"
         citations_section = ["", "## 引用文献列表", citations_md, ""]
     else:
         source_line = f"- 参考文献({len(refs)}篇): {_refs_block(refs)}"
@@ -144,12 +146,17 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
     logger.info("[阶段③] 调用大模型学习需求与文献…")
     result = knowledge.learn(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement, refs, chunks=chunks)
 
-    if result.get("needs_search") and result.get("search_queries") and cfg.search_enabled:
-        queries = result["search_queries"][:3]
-        logger.info(f"[阶段③] 模型判定知识有缺口，联网补充: {queries}")
+    # 阶段③ 的联网补充：仅 local 模式启用。rag 模式下知识来源应限于文献库，
+    # 混入网络资料会破坏"断言可溯源到文献页码"的引用原则（见架构文档 §1.2）。
+    if result.get("needs_search") and result.get("search_queries") and cfg.mode == "rag":
+        logger.info("[阶段③] rag 模式下不启用联网补充（知识来源限于文献库）。"
+                    "如需联网请改用 --mode local。")
+    elif result.get("needs_search") and result.get("search_queries") and cfg.search_enabled:
+        web_queries = result["search_queries"][:3]
+        logger.info(f"[阶段③] 模型判定知识有缺口，联网补充: {web_queries}")
         try:
             from search import web_search
-            results = web_search(queries, cfg.search_top_k, proxy=cfg.search_proxy)
+            results = web_search(web_queries, cfg.search_top_k, proxy=cfg.search_proxy)
             payload = {"results": results, "_first_summary": result.get("knowledge_summary_md", "")}
             result = knowledge.learn(
                 cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model,

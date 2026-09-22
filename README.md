@@ -28,6 +28,8 @@
 ├── verify.py          # ⑤ 视觉模型审稿校验
 ├── config.py          # 集中配置（环境变量，启动时快速失败）
 ├── tests/             # mock 单测（不访问网络、不产生费用）
+├── scripts/           # RAGFlow 部署运维：ragflow_bootstrap.py（建号/取 Key/建库）
+│                      #                    ragflow_ops.py（上传/解析/状态/检索试跑）
 ├── references/        # ← 把参考文献放这里
 ├── output/            # 每次运行的插图、报告归档
 ├── knowledge/         # AI 汇总的知识摘要与绘图规格

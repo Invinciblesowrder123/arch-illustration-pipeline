@@ -118,3 +118,52 @@ Authorization: Bearer {RAGFLOW_API_KEY}
 | 200 篇中混有低质量文献污染检索 | RAGFlow 支持按文档开关检索权限，发现噪源即关 |
 | RAGFlow 服务不在教授本机 | retrieval 是 HTTP API，CLI 在任何机器都能远程调用 |
 | 与康复项目 Dify+Weaviate 栈并存 | 长期建议评估统一到 RAGFlow，一个 RAG 栈服务两条业务线 |
+
+## 10. 实测补充（2026-09-22 本机部署验证，RAGFlow v0.27.2）
+
+本机已完整部署一套 RAGFlow 并把 P2 客户端打到真机（部署细节见
+`D:\AI\RAGFlow\README.md`，运维脚本已收进本仓库 `scripts/ragflow_bootstrap.py`
+与 `scripts/ragflow_ops.py`）。**以下是与原设计假设不符、必须在 P1 前明确的事实。**
+
+### 10.1 嵌入模型不再内置在 ragflow 镜像里（影响机器选型）
+
+架构文档 §5 原假设"嵌入模型中文首选 BAAI/bge-m3（RAGFlow 内置）"。v0.27.2 已改为
+**独立 TEI 容器**（`infiniflow/text-embeddings-inference:cpu-1.8`，11GB 镜像，
+内含 bge-m3 与 Qwen3-Embedding-0.6B），需要：
+
+1. `COMPOSE_PROFILES` 追加 `tei-cpu`（源码识别内置嵌入的条件是 `"tei-" in COMPOSE_PROFILES`）
+2. `TEI_MODEL` 与镜像内模型名一致
+3. 租户默认嵌入 + **dataset 的 `embd_id`**（格式 `<模型名>@Builtin`）
+
+**内存实测（bge-m3 / CPU / 8 workers）：TEI 独占 17.1GB**，整栈约 20.5GB。
+即 **16GB 服务器跑不动 bge-m3 版**（这正是官方 .env 里"bge-m3 需 21GB"的含义）。
+P1 选型三选一：① 服务器 ≥32GB 内存；② `TEI_MODEL=Qwen/Qwen3-Embedding-0.6B`（预期约 5GB）；
+③ 嵌入走外部 API。**此决策需在 215 篇入库前定，因为换模型要重算全库向量。**
+
+### 10.2 已核验的检索 API 差异（P2 客户端已按此修正）
+
+对照 v0.27.2 源码（`api/apps/restful_apis/chunk_api.py`）+ 真机验证：
+
+| 项 | 原实现假设 | v0.27.2 实际 | 处理 |
+|---|---|---|---|
+| 候选池参数 | `top_k` | **`knn_top_k`**（旧名可用但记 deprecated） | 客户端改发 `knn_top_k`；老版本忽略未知字段回落默认值 |
+| 文献名 | `document_name` | **`document_keyword`**（内部 `docnm_kwd`） | 客户端两者兼容 |
+| 页码 | `page_number` | **`positions[[0][0]]`，0 基**（`extract_positions` 做了 `-1`） | **一律 +1**（真机验证命中 p.2/p.3 正确） |
+| 正文 | `content` | `content`（内部 `content_with_weight`） | 客户端两者兼容 |
+| 列表分页 | 任意 page_size | **有上限**（500 被拒） | 运维脚本用 ≤100 |
+
+### 10.3 解析环节的硬约束
+
+- **`paper` 切片方法只支持 PDF**：DOCX 会报 `file type not supported yet(pdf supported)`。
+  教授语料是 PDF，保持 `paper`；若日后要入 DOCX/TXT 需另建 `naive` 方法的 dataset。
+- **`POST /datasets/{id}/documents/parse` 必须显式传 `document_ids`**。
+- 解析失败原因看文档的 `progress_msg` 字段（如 `No default embedding model is set.`），
+  比服务端日志更快定位。
+- 扫描版 PDF 走 DeepDoc OCR 成功（本机用 4MB 扫描件验证通过）。
+
+### 10.4 消费侧验收结论
+
+- `python main.py --check`：4 项全绿（文本 / 读图 / RAGFlow 知识层探测）。
+- `python main.py --dry-run --mode rag`：真机检索命中，片段带正确页码与相似度。
+- mock 单测 31 项全绿。
+- **待办**：教授侧 215 篇真实语料入库后重跑验收，并做 §5.1 的 chunking/embedding 调优。
