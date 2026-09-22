@@ -15,12 +15,15 @@ from pathlib import Path
 from config import ConfigError, load_config
 from errors import AppError
 from ingest import collect_references
+from version import __release_date__, __release_name__, __version__
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="考古学论文插图生成流水线")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__}（{__release_date__}，{__release_name__}）")
     p.add_argument("--requirement", "-r", help="绘图需求描述（不给则读 requirement.txt 或交互输入）")
     p.add_argument("--refs", type=Path, help="参考文献目录（默认 ./references）")
     p.add_argument("--out", type=Path, help="输出目录（默认 ./output）")
@@ -57,6 +60,11 @@ def get_requirement(args: argparse.Namespace) -> str:
         print("需求不能为空。")
         sys.exit(1)
     return text
+
+
+def _log_banner(logger) -> None:
+    """启动横幅：打出版本，便于从日志判断现场跑的是哪一版。"""
+    logger.info(f"arch-illustration {__version__}（{__release_date__} {__release_name__}）")
 
 
 def main() -> int:
@@ -133,6 +141,7 @@ def main() -> int:
 
     from logger import setup_logging
     logger = setup_logging(cfg.log_dir)
+    _log_banner(logger)
 
     requirement = get_requirement(args)
     logger.info(f"绘图需求: {requirement}")
