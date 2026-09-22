@@ -99,12 +99,25 @@ def upload(dataset_id: str, files: list[Path], batch_size: int) -> list[str]:
     return uploaded
 
 
-def trigger_parse(dataset_id: str, doc_ids: list[str], batch: int = 20) -> None:
+def trigger_parse(dataset_id: str, doc_ids: list[str], batch: int = 10, attempts: int = 3) -> int:
+    """触发解析。小批量 + 失败重试（文档多时接口会偶发 Internal server error）。
+
+    返回成功触发的文档数。
+    """
+    ok = 0
     for i in range(0, len(doc_ids), batch):
-        r = requests.post(f"{API}/datasets/{dataset_id}/documents/parse", headers=_h(),
-                          json={"document_ids": doc_ids[i:i + batch]}, timeout=300).json()
-        if r.get("code") != 0:
-            print(f"  ✗ 触发解析失败: {r.get('message')}", flush=True)
+        chunk = doc_ids[i:i + batch]
+        for k in range(attempts):
+            r = requests.post(f"{API}/datasets/{dataset_id}/documents/parse", headers=_h(),
+                              json={"document_ids": chunk}, timeout=300).json()
+            if r.get("code") == 0:
+                ok += len(chunk)
+                break
+            if k == attempts - 1:
+                print(f"  ✗ 触发解析失败（已重试 {attempts} 次）: {r.get('message')}", flush=True)
+            else:
+                time.sleep(5 * (k + 1))
+    return ok
 
 
 def progress_snapshot(dataset_id: str) -> tuple[dict, list[dict]]:
@@ -115,14 +128,20 @@ def progress_snapshot(dataset_id: str) -> tuple[dict, list[dict]]:
     return counts, docs
 
 
-def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int) -> None:
-    """轮询到"没有文档在跑"为止。ETA 按页数估算（文档数会被大部头带偏）。
+def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
+              wave_mode: bool = False) -> None:
+    """轮询到没有文档在跑为止。ETA 按页数估算（文档数会被大部头带偏）。
 
-    退出条件用「连续两次采样 RUNNING==0」而非「RUNNING==0 且 UNSTART==0」：
-    分波提交时（--wave）未触发的文档会一直停在 UNSTART，若把它算作待办就永远不退出。
+    退出条件分两种（用 --wave 区分）：
+    - 整库模式（默认）：RUNNING==0 **且** UNSTART==0 才算跑完——否则整库排队时
+      一旦出现瞬间空档就会误判为结束（2026-09-22 实测踩到：论文组还剩 119 篇未触发
+      就被判结束，脚本跳去跑专著组）。
+    - 分波模式（--wave N）：只看 RUNNING==0，因为剩余未触发的文档本来就该留到下一波。
+    两种情况都要求**连续两次采样**满足条件，避免波次间空档误判。
     """
     t0 = time.time()
     idle_hits = 0
+    stall_polls = 0
     _, docs0 = progress_snapshot(dataset_id)
     base_done = sum(1 for d in docs0 if d.get("run") == "DONE")
     base_pages = sum(page_map.get(d["name"], 0) for d in docs0 if d.get("run") == "DONE")
@@ -145,7 +164,8 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int) -> N
               f" · 运行中 {counts.get('RUNNING',0)} · 未触发 {counts.get('UNSTART',0)}"
               f" · 失败 {counts.get('FAIL',0)}{eta}", flush=True)
 
-        if counts.get("RUNNING", 0) == 0:
+        idle = counts.get("RUNNING", 0) == 0 and (wave_mode or counts.get("UNSTART", 0) == 0)
+        if idle:
             idle_hits += 1
             if idle_hits >= 2:  # 连续两次为空，确认不是波次间的空档
                 if counts.get("UNSTART", 0):
@@ -160,6 +180,16 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int) -> N
                 return
         else:
             idle_hits = 0
+            # 自愈：长时间有 UNSTART 且没有在跑的任务时，补触发（触发接口会偶发 500）
+            unstart = [d["id"] for d in docs if (d.get("run") or "UNSTART") == "UNSTART"]
+            if unstart and counts.get("RUNNING", 0) == 0:
+                stall_polls += 1
+                if stall_polls >= 3:
+                    print(f"  ↻ 补触发 {len(unstart)} 篇未排队文档（接口偶发 500，自动重试）", flush=True)
+                    trigger_parse(dataset_id, unstart[:30], batch=5)
+                    stall_polls = 0
+            elif counts.get("RUNNING", 0) > 0:
+                stall_polls = 0
 
         if time.time() - t0 > timeout:
             print("等待超时，可用 --status-only 继续查看", flush=True)
@@ -231,7 +261,8 @@ def main() -> int:
             print(f"  触发解析 {len(todo)} 篇…", flush=True)
             trigger_parse(ds["id"], todo)
         if args.wait:
-            wait_done(ds["id"], man.get("page_map") or {}, args.interval, args.timeout)
+            wait_done(ds["id"], man.get("page_map") or {}, args.interval, args.timeout,
+                      wave_mode=bool(args.wave))
         else:
             counts, _ = progress_snapshot(ds["id"])
             print(f"  已提交，当前状态 {counts}（用 --status-only 查看进度）", flush=True)
