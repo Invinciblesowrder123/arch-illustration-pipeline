@@ -75,7 +75,26 @@ def _parse_json(raw: str) -> dict:
     raise KnowledgeError("模型未返回可解析的 JSON", detail=raw[:800])
 
 
-def _chat(client: OpenAI, model: str, system: str, user: str, temperature: float = 0.3) -> str:
+def _build_refs_content(refs: list[dict]) -> list[dict]:
+    """把文献列表构造成多模态 content：普通文献走文本，视觉直读文献附逐页图片。"""
+    parts: list[dict] = []
+    n_imgs = 0
+    for i, r in enumerate(refs, 1):
+        header = f"### 文献 {i}: {r['name']}\n"
+        if r.get("pages"):
+            header += "（该文献为扫描版、无文字层，以下是逐页扫描图片，请直接阅读图片中的内容并作为知识依据）\n"
+            parts.append({"type": "text", "text": header})
+            parts.extend({"type": "image_url", "image_url": {"url": uri}} for uri in r["pages"])
+            n_imgs += len(r["pages"])
+        else:
+            parts.append({"type": "text", "text": header + r["text"]})
+    if n_imgs:
+        parts.append({"type": "text", "text": f"（以上共附扫描页图片 {n_imgs} 张，请务必以图片内容为准提炼知识）"})
+    return parts
+
+
+def _chat(client: OpenAI, model: str, system: str, user, temperature: float = 0.3) -> str:
+    """user 可为 str（纯文本）或 list[dict]（多模态 content 数组）。"""
     resp = client.chat.completions.create(
         model=model,
         temperature=temperature,
@@ -97,15 +116,22 @@ def learn(
 ) -> dict:
     """知识学习主入口。无 search_results 时为首轮（可能要求搜索），有则为定稿轮。"""
     client = OpenAI(api_key=api_key, base_url=base_url)
-    refs_text = "\n\n".join(
-        f"### 文献 {i}: {r['name']}\n{r['text']}" for i, r in enumerate(refs, 1)
-    )
+    has_images = any(r.get("pages") for r in refs)
 
     if search_results is None:
         user = USER_PROMPT_TEMPLATE.format(
-            requirement=requirement, n_refs=len(refs), refs_text=refs_text, search_block=""
+            requirement=requirement, n_refs=len(refs),
+            refs_text="（见下方文献内容）" if has_images else "",
+            search_block="",
         )
-        first = _parse_json(_chat(client, model, SYSTEM_PROMPT, user))
+        if has_images:
+            # 扫描版文献以逐页图片形式附在 content 数组里，交给多模态模型直读
+            user_content: str | list = [{"type": "text", "text": user}, *_build_refs_content(refs)]
+        else:
+            user_content = user + "\n" + "\n\n".join(
+                f"### 文献 {i}: {r['name']}\n{r['text']}" for i, r in enumerate(refs, 1)
+            )
+        first = _parse_json(_chat(client, model, SYSTEM_PROMPT, user_content))
         first.setdefault("needs_search", False)
         first.setdefault("search_queries", [])
         return first

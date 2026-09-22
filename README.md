@@ -81,7 +81,24 @@ python main.py
 
 把绘图所依据的文献放进 `references` 文件夹，支持 **PDF / Word（.docx）/ TXT / Markdown**。
 
-> ⚠️ 扫描版 PDF（图片型、无文字层）无法读取，请换文字版。
+**扫描版 PDF（无文字层）也能读**，三级回退链自动处理：
+
+```
+MinerU 本地解析（免费） → 视觉直读（页面渲染成图片交给多模态模型，消耗较多 token） → 跳过该文献
+```
+
+默认策略 `auto`：运行时交互询问（非交互环境下自动选 MinerU，无 MinerU 则视觉直读）。
+也可用 `--scan-policy mineru|visual|skip` 直接指定。
+
+**MinerU 自动探测**（不写死路径，按以下顺序）：
+
+1. 环境变量 `MINERU_CMD` —— 显式指定 mineru / magic-pdf 可执行文件
+2. `PATH` 中的 `mineru` 或 `magic-pdf` 命令
+3. **当前 Python 环境库** —— 检查 `mineru` / `magic_pdf` 包是否已安装
+4. 常见 venv 目录扫描 —— 工作目录及上级（3 级内）、用户主目录及 `venvs/.venvs/envs` 下，目录名含 `mineru` 的环境（如 `.venv-mineru`）
+
+> MinerU 首次在新机器解析会自动下载模型（1-2 GB）；默认使用 `-b pipeline` 后端（CPU 可跑，约 2-10 秒/页），可用环境变量 `MINERU_BACKEND` / `MINERU_TIMEOUT` 调整。
+> 视觉直读每篇最多渲染前 8 页（110 DPI）。
 
 ### 第 2 步：描述绘图需求
 
@@ -129,6 +146,7 @@ python main.py
 | `python main.py --max-attempts 5` | 增加自动重绘轮数 |
 | `python main.py --no-search` | 禁止联网补充知识（只用你给的文献） |
 | `python main.py -r "需求文字"` | 直接在命令里给需求 |
+| `python main.py --scan-policy visual` | 扫描版 PDF 强制走视觉直读（多模态模型读页面图片） |
 
 ## 工作原理
 
@@ -150,7 +168,8 @@ flowchart LR
 
 - **报 `not available for this group`**：你的密钥分组没开通对应模型（aixw 的语言模型与绘图模型分属不同分组，需要两个不同的 key）。去服务商控制台换分组/换 key，或在 `.env` 里给绘图模型单独配其他服务商。
 - **报"参考文献目录为空"**：文献还没放进 `references` 文件夹。
-- **报"文件内容过少（疑似扫描版 PDF）"**：扫描版 PDF 无文字层，请换文字版。
+- **报"文件内容过少（疑似扫描版 PDF）"**：扫描版 PDF 会自动走回退链（MinerU → 视觉直读 → 跳过）；若全部失败请检查 MinerU 安装或改用 `--scan-policy visual`。
+- **MinerU 解析报 404 / 连接失败**：多为系统代理劫持了 MinerU 内部的 localhost 通信（本项目已自动为 MinerU 子进程清除代理环境变量）；若仍失败，检查代理软件的"绕过局域网"设置。
 - **报"缺少必需环境变量"**：首次向导没跑完，删除 `.env` 后重新运行 `python main.py`。
 - **想换服务商**：只改 `.env` 里对应行的地址、密钥、模型名即可，无需改代码。语言模型需支持读图（承担审稿校验）。
 

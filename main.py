@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="只检查文献能否读取，不调用模型、不产生费用")
     p.add_argument("--check", action="store_true", help="模型连通性自检（文本/读图/绘图各实测一次）")
     p.add_argument("--skip-image", action="store_true", help="配合 --check：跳过绘图测试，不产生绘图费用")
+    p.add_argument("--scan-policy", choices=["auto", "mineru", "visual", "skip"], default="auto",
+                   help="扫描版 PDF（无文字层）处理策略：auto=交互询问；mineru=MinerU本地解析；"
+                        "visual=渲染成图片交给多模态模型直读；skip=跳过（默认 auto）")
     return p.parse_args()
 
 
@@ -58,6 +61,7 @@ def main() -> int:
 
     # 首次启动：只让用户填一次 API Key，其余默认（aixw / gpt-5.6-sol / gpt-image-2）
     from setup import ensure_env
+    first_run = False
     if not args.dry_run:
         first_run = not ensure_env(interactive_ok=True)
 
@@ -89,13 +93,14 @@ def main() -> int:
 
     if args.dry_run:
         try:
-            refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit)
+            refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit, scan_policy=args.scan_policy)
         except AppError as e:
             print(f"[文献检查失败] {e.message}")
             return 1
         print(f"[dry-run] 文献摄取正常，共 {len(refs)} 篇:")
         for r in refs:
-            print(f"  - {r['name']} ({r['ext']}, {r['chars']} 字)")
+            kind = "视觉直读图片×" + str(len(r["pages"])) if r.get("pages") else f"{r['chars']} 字"
+            print(f"  - {r['name']} ({r['ext']}, {kind})")
         print("[dry-run] 配置校验通过，未调用任何模型。可以正式运行。")
         return 0
 
@@ -107,7 +112,7 @@ def main() -> int:
 
     from pipeline import run
     try:
-        result = run(cfg, requirement)
+        result = run(cfg, requirement, scan_policy=args.scan_policy)
     except AppError as e:
         logger.error(f"流水线中止: {e.message}")
         if e.detail:

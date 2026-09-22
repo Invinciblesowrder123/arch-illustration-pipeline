@@ -19,7 +19,11 @@ logger = logging.getLogger("painter")
 
 
 def _refs_block(refs: list[dict]) -> str:
-    return "、".join(f"{r['name']}({r['chars']}字)" for r in refs)
+    parts = []
+    for r in refs:
+        tag = f"{r['chars']}字" if not r.get("pages") else f"视觉直读{len(r['pages'])}页"
+        parts.append(f"{r['name']}({tag})")
+    return "、".join(parts)
 
 
 def _write_report(
@@ -54,7 +58,7 @@ def _write_report(
     return report
 
 
-def run(cfg: Config, requirement: str) -> dict:
+def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
     """执行完整流水线，返回 {ok, final_image, report, attempts}。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = cfg.output_dir / f"run_{timestamp}"
@@ -62,11 +66,13 @@ def run(cfg: Config, requirement: str) -> dict:
 
     # ---- 阶段②：摄取参考文献 ----
     logger.info(f"[阶段②] 扫描参考文献目录: {cfg.refs_dir}")
-    refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit)
+    refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit, scan_policy=scan_policy, logger=logger)
     for r in refs:
-        logger.info(f"  已读取: {r['name']} ({r['chars']} 字)")
+        kind = f"视觉直读 {len(r['pages'])} 页" if r.get("pages") else f"{r['chars']} 字"
+        logger.info(f"  已读取: {r['name']}（{kind}）")
     total_chars = sum(r["chars"] for r in refs)
-    logger.info(f"共 {len(refs)} 篇文献，合计 {total_chars} 字")
+    n_visual = sum(1 for r in refs if r.get("pages"))
+    logger.info(f"共 {len(refs)} 篇文献（其中视觉直读 {n_visual} 篇），文本合计 {total_chars} 字")
 
     # ---- 阶段③：知识学习 ----
     logger.info("[阶段③] 调用大模型学习需求与文献…")
