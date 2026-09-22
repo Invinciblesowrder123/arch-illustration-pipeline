@@ -128,6 +128,11 @@ def parse_pdf_with_mineru(cmd: str, pdf_path: Path, work_dir: Path, timeout: int
                  if k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     clean_env["NO_PROXY"] = "*"
     clean_env["no_proxy"] = "*"
+    # Windows 控制台默认 GBK，MinerU 输出含特殊 Unicode 字符时会以
+    # "No mapping for the Unicode character ... multi-byte code page" 崩溃，
+    # 强制子进程用 UTF-8 输入输出。
+    clean_env["PYTHONIOENCODING"] = "utf-8"
+    clean_env["PYTHONUTF8"] = "1"
     try:
         proc = subprocess.run(
             [cmd, "-p", str(pdf_path), "-o", str(out_dir), "-b", backend],
