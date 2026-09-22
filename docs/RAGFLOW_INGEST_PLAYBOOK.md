@@ -177,7 +177,45 @@ python scripts/ragflow_ops.py retrieve "昙石山遗址的贝壳堆积与年代"
 | 检索结果全是同一篇 | 语料集中在少数文献 | 正常；按 §5.1 建回归集再调 chunk/阈值 |
 | 检索命中率低 | 术语不一致（"昙石山" vs "曇石山"） | 建术语/同义词表（RAGFlow 术语重写），或让查询规划器多出几组词 |
 
-## 7. 未完成 / 待决
+## 7. 暂停与恢复（用完机器先让路）
+
+入库是长时间 CPU 密集任务（本机实测整栈约占 20GB 内存 / 7-8 核）。需要把机器让给别人时，
+**停容器即可，数据全在命名卷里，不会丢**：
+
+```powershell
+# ── 暂停 ──（约 10 秒，内存/CPU 立即归还；Docker 自身仅剩约 240MB）
+cd D:\AI\RAGFlow\ragflow\docker
+docker compose stop
+
+# ── 恢复 ──
+cd D:\AI\RAGFlow\ragflow\docker
+docker compose up -d --pull never      # 起栈（tei 加载 bge-m3 约需 1 分钟）
+docker compose ps                      # 各容器应 healthy / Up
+
+# 确认知识层可用（应 4 项全绿）
+cd D:\AI\Painter
+python main.py --check --skip-image
+
+# 继续入库：论文组补跑并等排空，随后专著组分波推进
+python scripts\ragflow_ingest.py --group papers --wait --interval 60
+for ($i=1; $i -le 4; $i++) { python scripts\ragflow_ingest.py --group books --wave 5 --wait --interval 60 }
+
+# 只看进度
+python scripts\ragflow_ingest.py --group all --status-only
+```
+
+**关于断点**：
+
+- 暂停时"正在解析"的文档会中断（重启后状态多为 `FAIL` 或回到 `UNSTART`）——
+  入库脚本会把 `UNSTART/FAIL` 一起重新触发，**不需要手工处理**。
+- 未触发的文档（`UNSTART`）同样由脚本重新触发。
+- 已 `DONE` 的文档与向量都在 ES / MySQL 卷里，**不会重跑**。
+- 断点快照见 `knowledge/ingest_checkpoint.md`（含各库完成数、chunk 与 token 量）。
+
+> 若不需要继续入库，只想起栈查库，可只 `docker compose up -d --pull never` 后直接
+> `python main.py --mode rag` 使用已有内容。
+
+## 8. 未完成 / 待决
 
 - [ ] 3 篇付费文献需教授用机构订阅获取（Ferrell 1969 / Grace 1961 / Grace 1964，见 §1.1）
 - [ ] `Pawley_Green_Chapter3` 的原始目标待教授确认（见 §1.1）
