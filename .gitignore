@@ -1,0 +1,10 @@
+.env
+.venv/
+.workbuddy/
+__pycache__/
+*.pyc
+logs/
+output/
+knowledge/
+references/
+requirement.txt
