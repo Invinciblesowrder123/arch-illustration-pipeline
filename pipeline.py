@@ -83,7 +83,7 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
         logger.info(f"[阶段③] 模型判定知识有缺口，联网补充: {queries}")
         try:
             from search import web_search
-            results = web_search(queries, cfg.search_top_k)
+            results = web_search(queries, cfg.search_top_k, proxy=cfg.search_proxy)
             payload = {"results": results, "_first_summary": result.get("knowledge_summary_md", "")}
             result = knowledge.learn(
                 cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model,

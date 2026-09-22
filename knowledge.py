@@ -109,6 +109,33 @@ def _chat(client: OpenAI, model: str, system: str, user, temperature: float = 0.
     return content
 
 
+FIX_PROMPTS_PROMPT = """基于以下绘图知识与需求，生成可直接用于绘图模型的提示词。
+
+## 需求
+{requirement}
+
+## 绘图知识
+{knowledge}
+
+严格输出 JSON：{{"image_prompt_zh": "中文提示词", "image_prompt_en": "English prompt"}}。"""
+
+
+def _ensure_prompts(client: OpenAI, model: str, requirement: str, result: dict) -> dict:
+    """校验绘图提示词字段；缺失或为空时调用模型自动补齐（比整轮重试便宜）。"""
+    if result.get("image_prompt_zh") and result.get("image_prompt_en"):
+        return result
+    raw = _chat(client, model, SYSTEM_PROMPT, FIX_PROMPTS_PROMPT.format(
+        requirement=requirement,
+        knowledge=result.get("knowledge_summary_md", "") or json.dumps(result.get("illustration_spec", {}), ensure_ascii=False),
+    ))
+    fixed = _parse_json(raw)
+    result["image_prompt_zh"] = result.get("image_prompt_zh") or fixed.get("image_prompt_zh", "")
+    result["image_prompt_en"] = result.get("image_prompt_en") or fixed.get("image_prompt_en", "")
+    if not result["image_prompt_en"] and not result["image_prompt_zh"]:
+        raise KnowledgeError("模型未能生成有效的绘图提示词", detail=raw[:500])
+    return result
+
+
 def learn(
     api_key: str, base_url: str, model: str,
     requirement: str, refs: list[dict],
@@ -134,7 +161,7 @@ def learn(
         first = _parse_json(_chat(client, model, SYSTEM_PROMPT, user_content))
         first.setdefault("needs_search", False)
         first.setdefault("search_queries", [])
-        return first
+        return _ensure_prompts(client, model, requirement, first)
 
     # 定稿轮：并入搜索结果
     from search import format_search_results
@@ -146,4 +173,4 @@ def learn(
     )
     final = _parse_json(_chat(client, model, SYSTEM_PROMPT, user))
     final["needs_search"] = False
-    return final
+    return _ensure_prompts(client, model, requirement, final)

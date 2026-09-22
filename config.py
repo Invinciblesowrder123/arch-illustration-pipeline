@@ -34,6 +34,7 @@ class Config:
     max_attempts: int
     search_enabled: bool
     search_top_k: int
+    search_proxy: str | None
     per_file_char_limit: int
     refs_dir: Path
     output_dir: Path
@@ -100,6 +101,7 @@ def load_config(
         max_attempts=attempts,
         search_enabled=(not no_search) and os.environ.get("SEARCH_ENABLED", "1").strip() not in {"0", "false", "False"},
         search_top_k=int(os.environ.get("SEARCH_TOP_K", "5")),
+        search_proxy=os.environ.get("SEARCH_PROXY", "").strip() or None,
         per_file_char_limit=int(os.environ.get("PER_FILE_CHAR_LIMIT", "30000")),
         refs_dir=refs_dir or PROJECT_ROOT / "references",
         output_dir=output_dir or PROJECT_ROOT / "output",

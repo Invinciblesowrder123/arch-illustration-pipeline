@@ -7,8 +7,12 @@ import logging
 from errors import SearchError
 
 
-def web_search(queries: list[str], top_k: int = 5) -> list[dict]:
-    """返回 [{query, title, url, snippet}]。任何失败抛 SearchError，由调用方降级。"""
+def web_search(queries: list[str], top_k: int = 5, proxy: str | None = None) -> list[dict]:
+    """返回 [{query, title, url, snippet}]。任何失败抛 SearchError，由调用方降级。
+
+    proxy: http 代理地址（如 http://127.0.0.1:7890）。国内网络访问 startpage/brave
+    等搜索引擎通常需要代理；留空则直连（读取系统环境变量代理，若设置）。
+    """
     logger = logging.getLogger("painter")
     try:
         from ddgs import DDGS
@@ -18,7 +22,7 @@ def web_search(queries: list[str], top_k: int = 5) -> list[dict]:
     results: list[dict] = []
     for q in queries:
         try:
-            with DDGS() as ddgs:
+            with DDGS(proxy=proxy) as ddgs:
                 for r in ddgs.text(q, max_results=top_k):
                     results.append({
                         "query": q,
