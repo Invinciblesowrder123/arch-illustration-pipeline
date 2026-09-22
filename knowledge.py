@@ -17,10 +17,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from openai import OpenAI
 
 from errors import KnowledgeError
+
+logger = logging.getLogger("painter")
 
 SYSTEM_PROMPT = """你是考古学学术论文插图的资深顾问，精通考古类型学、地层学、器物图谱与学术出版规范。
 你的任务是根据教授的绘图需求和参考文献，提炼准确的绘图知识，并给出可直接用于 AI 绘图模型的提示词。
@@ -56,6 +59,66 @@ REFINE_SEARCH_PROMPT_TEMPLATE = """## 教授的绘图需求
 - needs_search 必须为 false
 - 产出最终版 illustration_spec、image_prompt_zh、image_prompt_en
 严格输出 JSON。"""
+
+
+# ---------- RAG 模式（P2）：查询规划与片段注入 ----------
+
+QUERY_PLANNER_PROMPT = """你是考古学文献检索专家。教授给出如下绘图需求，
+请把它拆解为 3-5 组适合在考古学文献库中做向量+全文混合检索的查询词。
+
+要求：
+1. 覆盖不同角度：器物名（含全称与简称）、时代/文化、形制与工艺特征、场景主题。
+2. 注意考古文献中同一器物可能有多种称呼（如"绿松石龙形器"常被简称"龙形器"），
+   不同称呼要各出一组查询，避免单一叫法漏召。
+3. 每组查询 4-12 个字，中文，不使用标点。
+
+严格输出 JSON：{{"queries": ["查询1", "查询2", ...]}}。
+
+## 绘图需求
+{requirement}"""
+
+CHUNKS_USER_PROMPT_TEMPLATE = """## 教授的绘图需求
+{requirement}
+
+## 从文献库检索到的相关知识片段（共 {n_chunks} 条，已按相关度排序）
+{chunks_text}
+
+以上片段全部来自真实文献，片段标题中的 [文献名 p.X] 即出处。
+
+请完成：
+1. 汇总片段中与绘图直接相关的专业知识（knowledge_summary_md，Markdown 格式）。
+   **每条实质性断言必须紧跟出处标注 [文献名 p.X]**（片段未标页码的写 [文献名]）；
+   片段中没有的知识宁可留白，不得编造，也不得混入你的背景知识。
+2. 判断仅凭上述片段能否画出学术上站得住脚的插图。若有明显知识缺口，设
+   needs_search=true 并给出 3 条以内精准的搜索查询词；若知识已足够，设 needs_search=false。
+3. 产出结构化绘图规格 illustration_spec 与中/英文绘图提示词（主体明确、要素逐一列举、
+   注明学术插图风格、比例参照、必要的文字标注）。"""
+
+
+def format_chunks(chunks: list[dict]) -> str:
+    """把检索片段格式化为带出处的文本块。"""
+    blocks = []
+    for i, c in enumerate(chunks, 1):
+        page = f" p.{c['page']}" if c.get("page") else ""
+        sim = c.get("similarity", 0.0)
+        blocks.append(f"### 片段 {i} [来源: {c['document_name']}{page}]（相关度 {sim:.2f}）\n{c['content']}")
+    return "\n\n".join(blocks)
+
+
+def plan_queries(api_key: str, base_url: str, model: str, requirement: str) -> list[str]:
+    """查询规划器：需求 → 3-5 组检索词。解析失败时降级为 [需求原文]。"""
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    try:
+        raw = _chat(client, model, SYSTEM_PROMPT,
+                    QUERY_PLANNER_PROMPT.format(requirement=requirement), temperature=0.2)
+        queries = _parse_json(raw).get("queries") or []
+    except KnowledgeError as e:
+        logger.warning(f"查询规划失败，降级用需求原文作为检索词: {e.message}")
+        return [requirement]
+    queries = [str(q).strip() for q in queries if str(q).strip()]
+    if not queries:
+        return [requirement]
+    return queries[:5]
 
 
 def _parse_json(raw: str) -> dict:
@@ -140,9 +203,24 @@ def learn(
     api_key: str, base_url: str, model: str,
     requirement: str, refs: list[dict],
     search_results: list[dict] | None = None,
+    chunks: list[dict] | None = None,
 ) -> dict:
-    """知识学习主入口。无 search_results 时为首轮（可能要求搜索），有则为定稿轮。"""
+    """知识学习主入口。
+
+    - chunks 非空（rag 模式）：以检索片段为知识来源，断言带 [文献 p.X] 出处；
+    - search_results 为 None 时为首轮（可能要求搜索），有则为定稿轮。
+    """
     client = OpenAI(api_key=api_key, base_url=base_url)
+
+    # ---- RAG 模式：检索片段通道 ----
+    if chunks:
+        user = CHUNKS_USER_PROMPT_TEMPLATE.format(
+            requirement=requirement, n_chunks=len(chunks), chunks_text=format_chunks(chunks))
+        first = _parse_json(_chat(client, model, SYSTEM_PROMPT, user))
+        first.setdefault("needs_search", False)
+        first.setdefault("search_queries", [])
+        return _ensure_prompts(client, model, requirement, first)
+
     has_images = any(r.get("pages") for r in refs)
 
     if search_results is None:

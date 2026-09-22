@@ -40,6 +40,16 @@ class Config:
     output_dir: Path
     knowledge_dir: Path
     log_dir: Path
+    # 知识层模式：rag=RAGFlow 检索 200+ 篇库；local=references/ 目录直读
+    mode: str
+    # RAGFlow 知识层（rag 模式必填）
+    ragflow_base_url: str
+    ragflow_api_key: str
+    ragflow_dataset_ids: list[str]
+    retrieval_top_k: int
+    retrieval_sim_threshold: float
+    retrieval_page_size: int
+    ragflow_timeout: int
 
 
 # 默认服务商：aixw（OpenAI 兼容中转）
@@ -61,6 +71,7 @@ def load_config(
     max_attempts: int | None = None,
     no_search: bool = False,
     require_llm: bool = True,
+    mode: str | None = None,
 ) -> Config:
     load_dotenv(PROJECT_ROOT / ".env")
 
@@ -87,6 +98,22 @@ def load_config(
     except ValueError:
         raise ConfigError("MAX_ATTEMPTS 必须是 >= 1 的整数。")
 
+    # ---- 知识层模式与 RAGFlow 配置 ----
+    # 模式解析优先级：显式 --mode > 环境变量 PIPELINE_MODE > 自动（RAGFlow 配置齐全则 rag，否则 local）
+    env_dataset = os.environ.get("RAGFLOW_DATASET_ID", "").strip()
+    ragflow_dataset_ids = [d.strip() for d in env_dataset.replace("；", ";").split(";") if d.strip()]
+    ragflow_base_url = os.environ.get("RAGFLOW_BASE_URL", "").strip().rstrip("/")
+    ragflow_api_key = os.environ.get("RAGFLOW_API_KEY", "").strip()
+    ragflow_ready = bool(ragflow_base_url and ragflow_api_key and ragflow_dataset_ids)
+    resolved_mode = (mode or os.environ.get("PIPELINE_MODE", "").strip() or ("rag" if ragflow_ready else "local")).lower()
+    if resolved_mode not in {"rag", "local"}:
+        raise ConfigError(f"mode 非法: {resolved_mode}，可选 rag / local。")
+    if resolved_mode == "rag" and not ragflow_ready:
+        raise ConfigError(
+            "mode=rag 需要 RAGFlow 配置齐全：RAGFLOW_BASE_URL / RAGFLOW_API_KEY / RAGFLOW_DATASET_ID。"
+            "请检查 .env，或改用 --mode local。"
+        )
+
     cfg = Config(
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
@@ -107,6 +134,14 @@ def load_config(
         output_dir=output_dir or PROJECT_ROOT / "output",
         knowledge_dir=PROJECT_ROOT / "knowledge",
         log_dir=PROJECT_ROOT / "logs",
+        mode=resolved_mode,
+        ragflow_base_url=ragflow_base_url,
+        ragflow_api_key=ragflow_api_key,
+        ragflow_dataset_ids=ragflow_dataset_ids,
+        retrieval_top_k=int(os.environ.get("RETRIEVAL_TOP_K", "12")),
+        retrieval_sim_threshold=float(os.environ.get("RETRIEVAL_SIM_THRESHOLD", "0.2")),
+        retrieval_page_size=int(os.environ.get("RETRIEVAL_PAGE_SIZE", "12")),
+        ragflow_timeout=int(os.environ.get("RAGFLOW_TIMEOUT", "60")),
     )
     for d in (cfg.refs_dir, cfg.output_dir, cfg.knowledge_dir, cfg.log_dir):
         d.mkdir(parents=True, exist_ok=True)

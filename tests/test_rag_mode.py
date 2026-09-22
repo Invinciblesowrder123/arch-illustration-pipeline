@@ -1,0 +1,312 @@
+# -*- coding: utf-8 -*-
+"""P2 RAG 模式 mock 单测：不访问网络、不调用真实模型。
+
+运行：在项目根目录执行
+  .venv/Scripts/python.exe -m unittest discover -s tests -t .
+"""
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from config import Config
+from errors import RagflowError
+from ragflow_client import RAGFlowClient, merge_chunks
+
+
+def _fake_config(mode: str = "rag") -> Config:
+    tmp = Path(tempfile.mkdtemp())
+    return Config(
+        llm_base_url="http://llm.test/v1", llm_api_key="sk-llm", llm_model="test-llm",
+        img_base_url="http://img.test/v1", img_api_key="sk-img", img_model="test-img",
+        img_size="1024x1024",
+        vision_base_url="http://llm.test/v1", vision_api_key="sk-llm", vision_model="test-llm",
+        max_attempts=1, search_enabled=False, search_top_k=5, search_proxy=None,
+        per_file_char_limit=30000,
+        refs_dir=tmp / "references", output_dir=tmp / "output",
+        knowledge_dir=tmp / "knowledge", log_dir=tmp / "logs",
+        mode=mode,
+        ragflow_base_url="http://ragflow.test", ragflow_api_key="sk-rf",
+        ragflow_dataset_ids=["ds1"], retrieval_top_k=5,
+        retrieval_sim_threshold=0.2, retrieval_page_size=5, ragflow_timeout=10,
+    )
+
+
+def _client() -> RAGFlowClient:
+    return RAGFlowClient("http://ragflow.test", "sk-rf", timeout=5)
+
+
+def _ok_response(data) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"code": 0, "data": data}
+    return resp
+
+
+class TestNormChunk(unittest.TestCase):
+    def test_page_number_field(self):
+        c = RAGFlowClient._norm_chunk({
+            "content": "龙身呈匚形", "document_name": "发掘报告.pdf",
+            "page_number": 3, "similarity": 0.71,
+        })
+        self.assertEqual(c["page"], 3)
+        self.assertEqual(c["document_name"], "发掘报告.pdf")
+        self.assertAlmostEqual(c["similarity"], 0.71)
+
+    def test_positions_fallback_0based(self):
+        c = RAGFlowClient._norm_chunk({
+            "content_with_weight": "绿松石镶嵌", "document_keyword": "简报.pdf",
+            "positions": [[4, 10, 20, 30, 40]], "similarity": "0.55",
+        })
+        self.assertEqual(c["content"], "绿松石镶嵌")
+        self.assertEqual(c["document_name"], "简报.pdf")
+        self.assertEqual(c["page"], 4)  # 非 0 页码视为已 1 基，原样保留
+        self.assertAlmostEqual(c["similarity"], 0.55)
+
+    def test_positions_zero_based_page(self):
+        # 页码为 0 时按 0 基处理，+1 转为 1 基
+        c = RAGFlowClient._norm_chunk({"content": "x", "positions": [[0, 1, 2, 3, 4]]})
+        self.assertEqual(c["page"], 1)
+
+    def test_no_page(self):
+        c = RAGFlowClient._norm_chunk({"content": "x"})
+        self.assertIsNone(c["page"])
+        self.assertEqual(c["document_name"], "未知文献")
+
+
+class TestRetrieve(unittest.TestCase):
+    def test_retrieve_parses_and_sorts(self):
+        client = _client()
+        raw = {"chunks": [
+            {"content": "低分片段", "document_name": "b.pdf", "page_number": 2, "similarity": 0.3},
+            {"content": "高分片段", "document_name": "a.pdf", "page_number": 1, "similarity": 0.9},
+            {"content": "", "document_name": "c.pdf", "similarity": 0.9},  # 空内容应被过滤
+        ]}
+        client._session = MagicMock()
+        client._session.request.return_value = _ok_response(raw)
+        chunks = client.retrieve("绿松石龙形器", ["ds1"], top_k=2,
+                                 similarity_threshold=0.2, page_size=2)
+        self.assertEqual([c["content"] for c in chunks], ["高分片段", "低分片段"])
+        payload = client._session.request.call_args.kwargs["json"]
+        self.assertEqual(payload["dataset_ids"], ["ds1"])
+        self.assertEqual(payload["top_k"], 2)
+        self.assertEqual(payload["similarity_threshold"], 0.2)
+
+    def test_business_error_raises(self):
+        client = _client()
+        client._session = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"code": 100, "message": "无权限"}
+        client._session.request.return_value = resp
+        with self.assertRaises(RagflowError):
+            client.retrieve("q", ["ds1"])
+
+    def test_http_error_raises(self):
+        client = _client()
+        client._session = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 401
+        resp.text = "unauthorized"
+        client._session.request.return_value = resp
+        with self.assertRaises(RagflowError):
+            client.retrieve("q", ["ds1"])
+
+    def test_empty_dataset_ids(self):
+        with self.assertRaises(RagflowError):
+            _client().retrieve("q", [])
+
+
+class TestMergeChunks(unittest.TestCase):
+    def test_merge_dedupe_and_cap(self):
+        c1 = {"content": "甲" * 200, "document_name": "a.pdf", "page": 1, "similarity": 0.9, "keywords": []}
+        c1_dup = {"content": "甲" * 200, "document_name": "a.pdf", "page": 1, "similarity": 0.8, "keywords": []}
+        c2 = {"content": "乙", "document_name": "b.pdf", "page": None, "similarity": 0.7, "keywords": []}
+        c3 = {"content": "丙", "document_name": "c.pdf", "page": 3, "similarity": 0.6, "keywords": []}
+        merged = merge_chunks([[c1, c2], [c1_dup, c3]], top_k=3)
+        self.assertEqual(len(merged), 3)  # c1_dup 与 c1 去重
+        self.assertEqual(merged[0]["content"], "甲" * 200)
+        self.assertEqual([m["similarity"] for m in merged], [0.9, 0.7, 0.6])
+
+    def test_top_k_cut(self):
+        chunks = [{"content": f"片段{i}", "document_name": "a.pdf", "page": None,
+                   "similarity": 0.5 + i / 100, "keywords": []} for i in range(5)]
+        self.assertEqual(len(merge_chunks([chunks], top_k=2)), 2)
+
+
+# ---------- knowledge 层 ----------
+
+_FAKE_LLM_JSON = json.dumps({
+    "knowledge_summary_md": "## 知识\n- 龙身呈匚形 [发掘报告.pdf p.3]",
+    "needs_search": False, "search_queries": [],
+    "illustration_spec": {"subject": "绿松石龙形器"},
+    "image_prompt_zh": "白描线图…", "image_prompt_en": "line drawing…",
+}, ensure_ascii=False)
+
+
+def _fake_openai(content: str):
+    """返回可替换 knowledge.OpenAI 的工厂，chat 固定返回 content。"""
+    def factory(api_key=None, base_url=None):
+        m = MagicMock()
+        m.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=content))])
+        return m
+    return factory
+
+
+class TestPlanQueries(unittest.TestCase):
+    def test_plan_ok(self):
+        import knowledge
+        content = json.dumps({"queries": ["绿松石龙形器", "龙形器 二里头", "绿松石 镶嵌 工艺"]}, ensure_ascii=False)
+        with patch.object(knowledge, "OpenAI", _fake_openai(content)):
+            queries = knowledge.plan_queries("k", "u", "m", "画绿松石龙形器")
+        self.assertEqual(len(queries), 3)
+
+    def test_plan_fallback_on_bad_json(self):
+        import knowledge
+        with patch.object(knowledge, "OpenAI", _fake_openai("不是 JSON")):
+            queries = knowledge.plan_queries("k", "u", "m", "画绿松石龙形器")
+        self.assertEqual(queries, ["画绿松石龙形器"])
+
+
+class TestLearnWithChunks(unittest.TestCase):
+    def test_chunks_prompt_carries_citation(self):
+        import knowledge
+        captured = {}
+
+        def fake_chat(client, model, system, user, temperature=0.3):
+            captured["user"] = user
+            return _FAKE_LLM_JSON
+
+        chunks = [{"content": "龙身呈匚形", "document_name": "发掘报告.pdf",
+                   "page": 3, "similarity": 0.8, "keywords": []}]
+        with patch.object(knowledge, "_chat", fake_chat), \
+             patch.object(knowledge, "OpenAI", _fake_openai(_FAKE_LLM_JSON)):
+            result = knowledge.learn("k", "u", "m", "画龙形器", refs=[], chunks=chunks)
+        self.assertIn("[来源: 发掘报告.pdf p.3]", captured["user"])
+        self.assertIn("每条实质性断言必须紧跟出处标注", captured["user"])
+        self.assertEqual(result["image_prompt_en"], "line drawing…")
+
+    def test_empty_chunks_falls_back_to_refs_path(self):
+        import knowledge
+        with patch.object(knowledge, "OpenAI", _fake_openai(_FAKE_LLM_JSON)), \
+             patch.object(knowledge, "_chat", return_value=_FAKE_LLM_JSON):
+            result = knowledge.learn("k", "u", "m", "需求", refs=[])
+        self.assertIn("image_prompt_zh", result)
+
+
+# ---------- pipeline rag 分支 ----------
+
+class TestPipelineRagMode(unittest.TestCase):
+    def _run(self, mode: str, tmp: Path):
+        import pipeline
+
+        cfg = _fake_config(mode)
+        cfg.output_dir = tmp / "out"
+        cfg.knowledge_dir = tmp / "kn"
+
+        chunks_q1 = [
+            {"content": "龙身呈匚形，吻部突出", "document_name": "发掘报告.pdf", "page": 3,
+             "similarity": 0.85, "keywords": []},
+            {"content": "绿松石片约2000余片", "document_name": "简报.pdf", "page": 5,
+             "similarity": 0.7, "keywords": []},
+        ]
+        chunks_q2 = [
+            {"content": "龙身呈匚形，吻部突出", "document_name": "发掘报告.pdf", "page": 3,
+             "similarity": 0.6, "keywords": []},  # 重复片段
+        ]
+
+        fake_rf = MagicMock()
+        fake_rf.retrieve.side_effect = lambda q, *a, **kw: (chunks_q1 if q == "q1" else chunks_q2)
+
+        learned = {"knowledge_summary_md": "知识", "needs_search": False, "search_queries": [],
+                   "illustration_spec": {}, "image_prompt_zh": "中", "image_prompt_en": "en"}
+
+        with patch.object(pipeline.knowledge, "plan_queries", return_value=["q1", "q2"]), \
+             patch.object(pipeline, "RAGFlowClient", return_value=fake_rf), \
+             patch.object(pipeline.knowledge, "learn", return_value=learned) as mock_learn, \
+             patch.object(pipeline.generate, "generate_image",
+                          side_effect=lambda _k, _u, _m, _s, _p, path: Path(path).write_bytes(b"\x89PNG fake")) as mock_gen, \
+             patch.object(pipeline.verify, "verify_image",
+                          return_value={"pass": True, "score": 9, "problems": [], "suggestions": ""}):
+            if mode == "local":
+                with patch.object(pipeline, "collect_references",
+                                  return_value=[{"name": "a.pdf", "ext": ".pdf", "chars": 100, "text": "内容"}]) as mock_refs:
+                    result = pipeline.run(cfg, "画绿松石龙形器")
+                mock_refs.assert_called_once()
+            else:
+                result = pipeline.run(cfg, "画绿松石龙形器")
+
+        if mode == "rag":
+            # learn 应收到去重后的 chunks（3 条去 1 条重复 = 2 条），refs 为空
+            self.assertEqual(len(mock_learn.call_args.kwargs.get("chunks") or []), 2)
+            self.assertEqual(mock_learn.call_args.args[4], [])  # refs 为空列表
+            self.assertEqual(fake_rf.retrieve.call_count, 2)
+        else:
+            self.assertIsNone(mock_learn.call_args.kwargs.get("chunks"))
+        mock_gen.assert_called_once()
+        return result, cfg
+
+    def test_rag_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            result, cfg = self._run("rag", Path(td))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "rag")
+            report = Path(result["report"]).read_text(encoding="utf-8")
+            self.assertIn("知识层模式: rag", report)
+            self.assertIn("引用文献列表", report)
+            self.assertIn("发掘报告.pdf", report)
+            self.assertIn("p.3", report)
+            self.assertIn("简报.pdf", report)
+            # 知识摘要照常落盘
+            self.assertTrue((cfg.knowledge_dir / "knowledge_summary.md").exists())
+
+    def test_local_branch_regression(self):
+        with tempfile.TemporaryDirectory() as td:
+            result, cfg = self._run("local", Path(td))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "local")
+            report = Path(result["report"]).read_text(encoding="utf-8")
+            self.assertIn("知识层模式: local", report)
+            self.assertIn("a.pdf", report)
+            self.assertNotIn("引用文献列表", report)
+
+    def test_rag_no_hits_raises(self):
+        import pipeline
+        cfg = _fake_config("rag")
+        fake_rf = MagicMock()
+        fake_rf.retrieve.return_value = []
+        with patch.object(pipeline.knowledge, "plan_queries", return_value=["q1"]), \
+             patch.object(pipeline, "RAGFlowClient", return_value=fake_rf):
+            with self.assertRaises(RagflowError):
+                pipeline.run(cfg, "画东西")
+
+
+class TestConfigModeResolution(unittest.TestCase):
+    def test_rag_requires_config(self):
+        from config import ConfigError, load_config
+        with patch.dict("os.environ", {"PIPELINE_MODE": "rag"}, clear=False):
+            # 未配 RAGFLOW_* 时应报配置错误
+            import os
+            os.environ.pop("RAGFLOW_BASE_URL", None)
+            os.environ.pop("RAGFLOW_API_KEY", None)
+            os.environ.pop("RAGFLOW_DATASET_ID", None)
+            with self.assertRaises(ConfigError):
+                load_config(mode="rag")
+
+    def test_local_mode_without_ragflow_ok(self):
+        from config import load_config
+        import os
+        os.environ.pop("RAGFLOW_BASE_URL", None)
+        os.environ.pop("RAGFLOW_API_KEY", None)
+        os.environ.pop("RAGFLOW_DATASET_ID", None)
+        with patch.dict("os.environ", {"PIPELINE_MODE": "local"}, clear=False):
+            cfg = load_config(mode=None)
+        self.assertEqual(cfg.mode, "local")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -19,8 +19,11 @@
 - ✅ 六阶段流水线全部真机验收通过（含扫描版 PDF 视觉直读端到端）
 - ✅ 双 Key 首启向导、连通性自检（`--check`）、MinerU 通用探测与解析（子进程已修 GBK 编码崩溃）
 - ✅ 架构设计定稿：`docs/RAGFLOW_ARCHITECTURE.md`（方案 A：RAGFlow 只做知识层）
-- ⏳ **下一步 = P2**：`ragflow_client.py` + `--mode rag` 接入 pipeline
-  （前置 P1/P1.5：教授侧部署 RAGFlow + 215 篇入库 + 入库调优，均未开始）
+- ✅ **P2 代码完成**：`ragflow_client.py` + `--mode rag/local` 双模式 + 引用溯源报告，
+  mock 单测 19 项全绿（`tests/test_rag_mode.py`，运行方式见文件头注释）
+- ⏳ **剩余 = P1/P1.5 + 真机验收**：教授侧部署 RAGFlow + 215 篇入库 + 入库调优（均未开始）；
+  P1 完成后在真机上做 `--mode rag` 端到端验收，并对照实际 RAGFlow 版本核对 API 字段
+  （重点：retrieval 返回的 page 字段是 page_number 还是 positions，见 ragflow_client.py `_norm_chunk`）
 
 ## 3. 阅读顺序
 
@@ -31,15 +34,21 @@
 4. 代码：`main.py`（入口）→ `pipeline.py`（编排）→ `knowledge.py`（阶段③，P2 主改动点）
    → `config.py`（配置）→ 其余按需
 
-## 4. P2 施工要点（接手后第一件事）
+## 4. P2 施工要点（代码已落地，以下为已实现状态）
 
-- 新增 `ragflow_client.py`：封装 retrieval / 批量上传 / dataset 管理（~150 行）
-- `knowledge.learn()` 增加 chunks 输入通道（与现有 refs/pages 并列，断言带 `[文献 p.X]` 引用）
-- `pipeline.run()` 加 mode 分支：rag 模式跳过阶段②摄取，改为「查询规划器 → 检索 → 注入」
-- `config.py` 加 `RAGFLOW_BASE_URL / RAGFLOW_API_KEY / RAGFLOW_DATASET_ID / RETRIEVAL_TOP_K`
-- `ingest.py` **不动**（local 模式原样保留）
-- 检索 API 样例见架构文档 §6；RAGFlow 版本迭代快，动手前先对目标版本核一遍 API
-- 验收：mock 单测 + RAGFlow 真机端到端（需 P1 完成）
+- ✅ `ragflow_client.py`：retrieval / 批量上传 / dataset 管理（`_request` 统一 Bearer 鉴权
+  与 code!=0 业务错误；`_norm_chunk` 兼容 page_number vs positions、content vs content_with_weight）
+- ✅ `knowledge.learn()` 增加 chunks 输入通道（`CHUNKS_USER_PROMPT_TEMPLATE`，断言强制带
+  `[文献 p.X]`）；新增查询规划器 `plan_queries()`（失败降级用需求原文）
+- ✅ `pipeline.run()` mode 分支：rag 模式跳过阶段②摄取，改为「查询规划器 → 逐组检索 →
+  merge_chunks 合并去重 → 注入」；报告新增知识层模式行 + 引用文献列表（含引用页码）
+- ✅ `config.py`：`RAGFLOW_BASE_URL / RAGFLOW_API_KEY / RAGFLOW_DATASET_ID /
+  RETRIEVAL_TOP_K / RETRIEVAL_SIM_THRESHOLD / RAGFLOW_TIMEOUT`；模式解析优先级
+  `--mode > PIPELINE_MODE > 自动`（RAGFlow 配置齐全自动用 rag）
+- ✅ `main.py --mode rag/local`；rag 模式 dry-run 真实测检索连通性（不调语言/绘图模型）
+- `ingest.py` 未动（local 模式原样保留）
+- **剩余**：RAGFlow 版本迭代快，真机验收前先对目标版本核一遍 API（HANDOFF 坑 6 同源风险）
+- 验收：✅ mock 单测 19 项全绿；⏳ RAGFlow 真机端到端（需 P1 完成）
 
 ## 5. 需交接人单独提供（不在仓库，也不该在）
 

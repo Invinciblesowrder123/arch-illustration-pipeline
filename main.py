@@ -26,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", type=Path, help="输出目录（默认 ./output）")
     p.add_argument("--max-attempts", type=int, help="绘图+校验最大轮数（默认 3）")
     p.add_argument("--no-search", action="store_true", help="禁用联网补充搜索")
+    p.add_argument("--mode", choices=["rag", "local"], default=None,
+                   help="知识层模式：rag=从 RAGFlow 文献库检索（需在 .env 配置 RAGFlow）；"
+                        "local=直读 references/ 目录。留空则自动：RAGFlow 配置齐全用 rag，否则 local")
     p.add_argument("--dry-run", action="store_true", help="只检查文献能否读取，不调用模型、不产生费用")
     p.add_argument("--check", action="store_true", help="模型连通性自检（文本/读图/绘图各实测一次）")
     p.add_argument("--skip-image", action="store_true", help="配合 --check：跳过绘图测试，不产生绘图费用")
@@ -69,7 +72,7 @@ def main() -> int:
         cfg = load_config(
             refs_dir=args.refs, output_dir=args.out,
             max_attempts=args.max_attempts, no_search=args.no_search,
-            require_llm=not args.dry_run,
+            require_llm=not args.dry_run, mode=args.mode,
         )
     except ConfigError as e:
         print(f"[配置错误] {e}")
@@ -92,6 +95,30 @@ def main() -> int:
             return 1
 
     if args.dry_run:
+        if cfg.mode == "rag":
+            # rag 模式 dry-run：真实访问 RAGFlow 做一次检索连通性测试（不调用语言/绘图模型）
+            from errors import RagflowError
+            from ragflow_client import RAGFlowClient
+            try:
+                client = RAGFlowClient(cfg.ragflow_base_url, cfg.ragflow_api_key, timeout=cfg.ragflow_timeout)
+                req_file = PROJECT_ROOT / "requirement.txt"
+                text = (args.requirement
+                        or (req_file.read_text(encoding="utf-8-sig").strip() if req_file.exists() else "")
+                        or "考古 器物 复原")
+                chunks = client.retrieve(text, cfg.ragflow_dataset_ids,
+                                         top_k=cfg.retrieval_top_k,
+                                         similarity_threshold=cfg.retrieval_sim_threshold,
+                                         page_size=cfg.retrieval_page_size)
+            except (RagflowError, OSError) as e:
+                print(f"[dry-run] RAGFlow 检索失败: {getattr(e, 'message', e)}")
+                return 1
+            print(f"[dry-run] RAGFlow 检索连通正常，需求原文检索命中 {len(chunks)} 个片段:")
+            for c in chunks[:5]:
+                page = f" p.{c['page']}" if c.get("page") else ""
+                print(f"  - [{c['document_name']}{page}] 相关度 {c['similarity']:.2f}: {c['content'][:50]}…")
+            print(f"[dry-run] 共 {len(cfg.ragflow_dataset_ids)} 个 dataset: {cfg.ragflow_dataset_ids}")
+            print("[dry-run] 未调用语言/绘图模型，配置校验通过。可以正式运行。")
+            return 0
         try:
             refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit, scan_policy=args.scan_policy)
         except AppError as e:

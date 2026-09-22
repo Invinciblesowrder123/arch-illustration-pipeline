@@ -16,16 +16,18 @@
 ## 项目结构
 
 ```
-├── main.py            # 命令行入口（含 --check 自检 / --dry-run）
+├── main.py            # 命令行入口（含 --check 自检 / --dry-run / --mode rag|local）
 ├── setup.py           # 首次启动向导：引导填入两个 API Key
 ├── check.py           # 连通性自检：文本 / 读图 / 绘图三项实测
-├── pipeline.py        # 六阶段编排器
-├── ingest.py          # ② 文献摄取（PDF / DOCX / TXT / MD）
-├── knowledge.py       # ③ 知识学习：文献汇总 + 绘图规格 + 提示词
+├── pipeline.py        # 六阶段编排器（rag 模式：检索代替文献摄取）
+├── ingest.py          # ② 文献摄取（PDF / DOCX / TXT / MD，local 模式）
+├── knowledge.py       # ③ 知识学习：文献汇总 + 绘图规格 + 提示词（含查询规划器）
 ├── search.py          # ③ 联网补充搜索（可选，失败自动降级）
+├── ragflow_client.py  # RAGFlow 知识层客户端（检索 / 批量上传 / dataset 管理）
 ├── generate.py        # ④ 绘图模型调用
 ├── verify.py          # ⑤ 视觉模型审稿校验
 ├── config.py          # 集中配置（环境变量，启动时快速失败）
+├── tests/             # mock 单测（不访问网络、不产生费用）
 ├── references/        # ← 把参考文献放这里
 ├── output/            # 每次运行的插图、报告归档
 ├── knowledge/         # AI 汇总的知识摘要与绘图规格
@@ -146,6 +148,8 @@ python main.py
 | `python main.py --max-attempts 5` | 增加自动重绘轮数 |
 | `python main.py --no-search` | 禁止联网补充知识（只用你给的文献） |
 | `python main.py -r "需求文字"` | 直接在命令里给需求 |
+| `python main.py --mode rag` | 从 RAGFlow 文献库检索知识（需在 .env 配置 RAGFlow 三项） |
+| `python main.py --mode local` | 强制直读 references/ 目录（默认行为，不依赖 RAGFlow） |
 | `python main.py --scan-policy visual` | 扫描版 PDF 强制走视觉直读（多模态模型读页面图片） |
 
 ## 工作原理
@@ -161,6 +165,7 @@ flowchart LR
 ```
 
 - **知识阶段**：文献内容（每篇可配截断上限）+ 需求一起交给语言模型，产出知识摘要、结构化绘图规格与中英双语提示词（提示词字段缺失时自动补齐）；模型判定知识有缺口时会给出搜索词，联网补充后二次定稿（可 `--no-search` 关闭）。
+- **知识层双模式**（`--mode`）：`local` 直读 `references/` 目录；`rag` 从 RAGFlow 文献库检索——需求先拆成 3-5 组检索词分别检索，合并去重后注入知识学习，知识摘要断言带 `[文献 p.X]` 出处，报告自动附引用文献列表。`.env` 里 RAGFlow 三项配齐则默认 rag。
 - **校验阶段**：视觉模型"读图"，对照需求与知识摘要逐项核对，输出 JSON 结论（通过与否、评分、问题清单、修改建议）；未通过则把问题清单注入提示词自动重绘。
 - **原则**：文献没写的细节宁可留白，不允许编造——审稿人提示词同样按此约束。
 

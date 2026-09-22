@@ -5,9 +5,13 @@
 
 ## 高优先级
 
-- [ ] **RAGFlow 知识层接入（P2）**
-  按 `docs/RAGFLOW_ARCHITECTURE.md` 实施：`ragflow_client.py` + `--mode rag` 接入
-  pipeline + 引用溯源报告。前置：教授侧完成 P1（RAGFlow 部署 + 215 篇入库）。
+- [ ] **RAGFlow 知识层接入（P2）—— 代码完成 ✅，待真机验收 ⏳**
+  `ragflow_client.py`（retrieval / 批量上传 / dataset 管理，防御式解析 page_number vs
+  positions 等版本差异）、`knowledge.py` 查询规划器 + chunks 注入通道（断言带 `[文献 p.X]`）、
+  `pipeline.py` rag/local 双模式分支 + 报告自动附引用文献列表、`main.py --mode rag|local`
+  （rag 模式 dry-run 实测检索连通性）。mock 单测 19 项全绿（`tests/test_rag_mode.py`）。
+  **剩余**：教授侧完成 P1（RAGFlow 部署 + 215 篇入库）后做真机端到端验收；
+  动手前先对照实际部署的 RAGFlow 版本核一遍 API 字段（见 HANDOFF 坑清单）。
   注：实测 references 目录已积累 215 篇（直塞上下文不可行），P1 完成后本项为第一优先。
 
 - [ ] **入库调优环节（P1.5，配合 RAGFlow）**

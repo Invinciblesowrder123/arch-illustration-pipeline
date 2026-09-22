@@ -30,3 +30,7 @@ class VerifyError(AppError):
 
 class SearchError(AppError):
     """联网搜索失败（可降级继续）。"""
+
+
+class RagflowError(AppError):
+    """RAGFlow 知识层调用失败（检索/上传/配置）。"""

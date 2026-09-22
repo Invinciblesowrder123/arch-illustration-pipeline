@@ -12,8 +12,9 @@ import generate
 import knowledge
 import verify
 from config import Config
-from errors import AppError, KnowledgeError, SearchError
+from errors import AppError, KnowledgeError, RagflowError, SearchError
 from ingest import collect_references
+from ragflow_client import RAGFlowClient, merge_chunks
 
 logger = logging.getLogger("painter")
 
@@ -26,21 +27,77 @@ def _refs_block(refs: list[dict]) -> str:
     return "、".join(parts)
 
 
+def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list[str]]:
+    """rag 模式阶段②：查询规划 → 逐组检索 → 合并去重。返回 (chunks, queries)。"""
+    client = RAGFlowClient(cfg.ragflow_base_url, cfg.ragflow_api_key, timeout=cfg.ragflow_timeout)
+    queries = knowledge.plan_queries(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement)
+    logger.info(f"[阶段②·rag] 检索规划 {len(queries)} 组查询: {queries}")
+    results_per_query: list[list[dict]] = []
+    for q in queries:
+        try:
+            hits = client.retrieve(
+                q, cfg.ragflow_dataset_ids,
+                top_k=cfg.retrieval_top_k,
+                similarity_threshold=cfg.retrieval_sim_threshold,
+                page_size=cfg.retrieval_page_size,
+            )
+        except RagflowError as e:
+            logger.warning(f"[阶段②·rag] 查询「{q}」检索失败（跳过）: {e.message}")
+            hits = []
+        logger.info(f"[阶段②·rag] 「{q}」命中 {len(hits)} 片段")
+        results_per_query.append(hits)
+    chunks = merge_chunks(results_per_query, top_k=cfg.retrieval_top_k)
+    if not chunks:
+        raise RagflowError(
+            "RAG 模式检索未命中任何片段：请检查 dataset 是否已入库、"
+            "检索阈值是否过高（RETRIEVAL_SIM_THRESHOLD），或改用 --mode local。")
+    logger.info(f"[阶段②·rag] 合并去重后共 {len(chunks)} 片段"
+                f"（{len({c['document_name'] for c in chunks})} 篇文献）")
+    return chunks, queries
+
+
+def _citations_block(chunks: list[dict]) -> tuple[str, list[dict]]:
+    """从命中片段汇总引用文献列表。返回 (markdown 文本, 去重后的文献列表)。"""
+    docs: dict[str, set] = {}
+    for c in chunks:
+        docs.setdefault(c["document_name"], set()).add(c.get("page"))
+    ordered = sorted(docs.items())
+    lines = []
+    for i, (name, pages) in enumerate(ordered, 1):
+        pages = sorted(p for p in pages if p is not None)
+        pages_txt = "，".join(f"p.{p}" for p in pages) if pages else "页码未标"
+        lines.append(f"{i}. {name}（引用页码: {pages_txt}）")
+    return "\n".join(lines), [{"name": n, "pages": sorted(p for p in ps if p is not None)} for n, ps in ordered]
+
+
 def _write_report(
     out_dir: Path, requirement: str, refs: list[dict],
     attempts: list[dict], final_ok: bool, final_image: Path | None,
+    mode: str = "local", chunks: list[dict] | None = None, queries: list[str] | None = None,
 ) -> Path:
+    if mode == "rag":
+        citations_md, _ = _citations_block(chunks or [])
+        source_line = (
+            f"- 知识来源: RAGFlow 检索（{len(queries or [])} 组查询，"
+            f"命中 {len(chunks or [])} 个片段、{len({c['document_name'] for c in (chunks or [])})} 篇文献）"
+        )
+        citations_section = ["", "## 引用文献列表", citations_md, ""]
+    else:
+        source_line = f"- 参考文献({len(refs)}篇): {_refs_block(refs)}"
+        citations_section = []
     lines = [
         "# 考古插图生成报告",
         f"- 生成时间: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"- 知识层模式: {mode}",
         f"- 绘图需求: {requirement}",
-        f"- 参考文献({len(refs)}篇): {_refs_block(refs)}",
+        source_line,
         f"- 最终结论: {'✅ 校验通过' if final_ok else '⚠️ 达到最大重试次数，仍有未解决问题（见下方明细）'}",
         f"- 最终插图: {final_image.name if final_image else '无'}",
         "",
         "## 绘图知识摘要",
         "见 knowledge/knowledge_summary.md",
         "",
+        *citations_section,
         "## 各轮生成与校验明细",
     ]
     for a in attempts:
@@ -64,19 +121,28 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
     run_dir = cfg.output_dir / f"run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- 阶段②：摄取参考文献 ----
-    logger.info(f"[阶段②] 扫描参考文献目录: {cfg.refs_dir}")
-    refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit, scan_policy=scan_policy, logger=logger)
-    for r in refs:
-        kind = f"视觉直读 {len(r['pages'])} 页" if r.get("pages") else f"{r['chars']} 字"
-        logger.info(f"  已读取: {r['name']}（{kind}）")
-    total_chars = sum(r["chars"] for r in refs)
-    n_visual = sum(1 for r in refs if r.get("pages"))
-    logger.info(f"共 {len(refs)} 篇文献（其中视觉直读 {n_visual} 篇），文本合计 {total_chars} 字")
+    refs: list[dict] = []
+    chunks: list[dict] | None = None
+    queries: list[str] | None = None
+
+    if cfg.mode == "rag":
+        # ---- 阶段②（rag 模式）：跳过目录摄取，改为查询规划 + RAGFlow 检索 ----
+        chunks, queries = _retrieve_knowledge(cfg, requirement)
+        refs = []  # rag 模式不直读 references/ 目录
+    else:
+        # ---- 阶段②：摄取参考文献 ----
+        logger.info(f"[阶段②] 扫描参考文献目录: {cfg.refs_dir}")
+        refs = collect_references(cfg.refs_dir, cfg.per_file_char_limit, scan_policy=scan_policy, logger=logger)
+        for r in refs:
+            kind = f"视觉直读 {len(r['pages'])} 页" if r.get("pages") else f"{r['chars']} 字"
+            logger.info(f"  已读取: {r['name']}（{kind}）")
+        total_chars = sum(r["chars"] for r in refs)
+        n_visual = sum(1 for r in refs if r.get("pages"))
+        logger.info(f"共 {len(refs)} 篇文献（其中视觉直读 {n_visual} 篇），文本合计 {total_chars} 字")
 
     # ---- 阶段③：知识学习 ----
     logger.info("[阶段③] 调用大模型学习需求与文献…")
-    result = knowledge.learn(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement, refs)
+    result = knowledge.learn(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement, refs, chunks=chunks)
 
     if result.get("needs_search") and result.get("search_queries") and cfg.search_enabled:
         queries = result["search_queries"][:3]
@@ -145,11 +211,13 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
     else:
         logger.error("[阶段⑥] 达到最大重试次数仍未通过校验，详见报告中的问题清单。")
 
-    report = _write_report(run_dir, requirement, refs, attempts, final_ok, final_image)
+    report = _write_report(run_dir, requirement, refs, attempts, final_ok, final_image,
+                           mode=cfg.mode, chunks=chunks, queries=queries)
     logger.info(f"[阶段⑥] 报告: {report}")
 
     return {
         "ok": final_ok,
+        "mode": cfg.mode,
         "final_image": final_image,
         "report": report,
         "attempts": attempts,
