@@ -25,7 +25,44 @@
 | 有文字层 | 211 篇 / 8595 页 |
 | 扫描版（需 DeepDoc OCR，慢） | 35 篇 / 5287 页 |
 | **内容重复（md5 相同）** | **58 个** |
-| **坏文件（0 页 / 0 字节）** | **3 个**（`14_Ferrell_1969_...`、`Pawley_Green_Chapter3`、`Pawley_Prehistory_Oceanic_Languages`）需重新下载 |
+| **损坏/不可用文件** | **3 个**（已移入 `references/_broken/`） |
+
+### 1.1 坏文件与缺失文献（2026-09-22 复核）
+
+`references/` 已按用途分子目录，**只移动、未删除**：
+
+- `_broken/`：3 个不可用文件
+  - `14_Ferrell_1969_Taiwan_Aboriginal_Groups.pdf`——21MB 但 **0 页**（文件损坏）
+  - `Pawley_Green_Chapter3.pdf`（**13KB**）、`Pawley_Prehistory_Oceanic_Languages.pdf`（**42KB**）
+    ——**截断的下载残留**（体积远小于正常论文），非空文件
+- `_duplicates/`：与保留件**字节相同**的冗余副本（如 `5_Grace_1964_…`）
+
+**缺失、需教授提供**（均为付费/纸本，无合法免费源，已核实）：
+
+| 文献 | 状态 |
+|---|---|
+| Ferrell, Raleigh. 1969. *Taiwan Aboriginal Groups: Problems in Cultural and Linguistic Classification*. 中央研究院民族學研究所專刊 17（444 页） | 只有纸本（NT$400，三民/萬卷樓/五南）；Sinica IR 无全文 |
+| Grace, G. W. 1961. Austronesian Linguistics and Culture History. *American Anthropologist* 63(2): 359-368. doi:10.1525/aa.1961.63.2.02a00070 | Wiley 付费墙（直下 403） |
+| Grace, G. W. 1964. The Linguistic Evidence. *Current Anthropology* 5(5): 361-368. doi:10.1086/200527 | University of Chicago Press 付费墙 |
+| `Pawley_Green_Chapter3.pdf` 的原始目标 | **疑似即**《The Austronesians》第 3 章（Pawley & **Ross**，pp. 43-80）——原文件名把合著者写成 Green；该章已从 ANU Press 开放获取下载并入库。若教授本意是另一篇 Pawley & Green 作品，需另行提供 |
+
+### 1.2 本次补齐的文献（已下载入库）
+
+- ✅ `Pawley_Ross_1995_Prehistory_of_Oceanic_Languages_Austronesians_ch3.pdf`（38 页）
+  ——《The Austronesians: Historical and Comparative Perspectives》第 3 章，ANU Press 开放获取
+  （https://press.anu.edu.au/publications/series/comparative-austronesian/austronesians）
+
+### 1.3 文件名与内容不符的更正
+
+- `3_Grace_1961_Austronesian_Linguistics_and_Culture_History.pdf` 的实际内容是
+  **Barker, Milton E. 1962. Topical Report 1. Linguistics. *Asian Perspectives* 6**（9 页），
+  与文件名完全不符 → 已按「**以 PDF 自身标题为准**」改名为
+  `Barker_1962_Topical_Report_1_Linguistics_Asian_Perspectives.pdf`
+  （RAGFlow 库内文档名同步更正）。
+- 另有一份真实文献 `Grace_Central_Eastern_Oceanic.pdf`（1.85MB / 22 页）保持原名。
+
+> 教训：**入库前用 PDF 首页文字核对文件名**，别信文件名的表面意思——本批就有一份
+> 名字是 Grace、内容是 Barker 的情况（而且被复制给了两个不同的文件名）。
 
 ## 2. 入库清单的生成规则
 
@@ -130,8 +167,10 @@ python scripts/ragflow_ops.py retrieve "昙石山遗址的贝壳堆积与年代"
 
 ## 7. 未完成 / 待决
 
-- [ ] 3 个坏文件重新下载后补入库
-- [ ] `3_Grace_1961` / `5_Grace_1964` 命名错配需人工确认
-- [ ] ⏸ 嵌入模型选型（bge-m3 vs Qwen3-Embedding-0.6B）——影响教授侧服务器规格与入库时长
-- [ ] 专著组入库（等模型选型确定后跑，避免重跑）
+- [ ] 3 篇付费文献需教授用机构订阅获取（Ferrell 1969 / Grace 1961 / Grace 1964，见 §1.1）
+- [ ] `Pawley_Green_Chapter3` 的原始目标待教授确认（见 §1.1）
+- [x] ✅ 已下载 Pawley & Ross 章节（ANU 开放获取）并入库
+- [x] ✅ 文件名与内容不符的 `3_Grace_1961_…` 已按 PDF 真实标题更正（Barker 1962）
+- [ ] 专著组入库（用户要求暂缓；21 篇 / 7546 页，多为扫描）
 - [ ] §5.1 的 20 组检索回归集（需教授提供历史需求）→ 建成后作为配置变更的验收护栏
+- [ ] 语料侧优化：`references/_duplicates/` 里的冗余副本可择机删除（当前保留未删）
