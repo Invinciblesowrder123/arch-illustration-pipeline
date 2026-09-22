@@ -116,28 +116,51 @@ def progress_snapshot(dataset_id: str) -> tuple[dict, list[dict]]:
 
 
 def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int) -> None:
-    """轮询直到全部解析结束。ETA 按页数估算（文档数会被大部头带偏）。"""
+    """轮询到"没有文档在跑"为止。ETA 按页数估算（文档数会被大部头带偏）。
+
+    退出条件用「连续两次采样 RUNNING==0」而非「RUNNING==0 且 UNSTART==0」：
+    分波提交时（--wave）未触发的文档会一直停在 UNSTART，若把它算作待办就永远不退出。
+    """
     t0 = time.time()
+    idle_hits = 0
+    _, docs0 = progress_snapshot(dataset_id)
+    base_done = sum(1 for d in docs0 if d.get("run") == "DONE")
+    base_pages = sum(page_map.get(d["name"], 0) for d in docs0 if d.get("run") == "DONE")
     while True:
         counts, docs = progress_snapshot(dataset_id)
         done_pages = sum(page_map.get(d["name"], 0) for d in docs if d.get("run") == "DONE")
         total_pages = sum(page_map.get(d["name"], 0) for d in docs)
         elapsed = time.time() - t0
+        # 速率按「本次运行期间的增量」计算——否则会把历史耗时算进本次，ETA 严重偏小
+        new_docs = counts.get("DONE", 0) - base_done
+        new_pages = done_pages - base_pages
         eta = ""
-        if done_pages:
-            pp = elapsed / done_pages
-            eta = f"　{pp:.2f} 秒/页　预计剩余 {(total_pages - done_pages) * pp / 60:.0f} 分钟"
+        if new_docs > 0 and elapsed > 30:
+            remain = counts.get("RUNNING", 0) + counts.get("UNSTART", 0)
+            rate_pages = new_pages / elapsed
+            eta = (f"　本次 {new_pages} 页/{(elapsed/60):.0f}min = {rate_pages*60:.1f} 页/分钟"
+                   f"　预计剩余 {(total_pages - done_pages) / rate_pages / 60:.0f} 分钟"
+                   if rate_pages > 0 else f"　剩余 {remain} 篇")
         print(f"[{elapsed/60:5.1f}min] 完成 {counts.get('DONE',0)} 篇/{done_pages} 页"
-              f" · 运行中 {counts.get('RUNNING',0)} · 待解析 {counts.get('UNSTART',0)}"
+              f" · 运行中 {counts.get('RUNNING',0)} · 未触发 {counts.get('UNSTART',0)}"
               f" · 失败 {counts.get('FAIL',0)}{eta}", flush=True)
-        if counts.get("RUNNING", 0) == 0 and counts.get("UNSTART", 0) == 0:
-            fails = [d for d in docs if d.get("run") == "FAIL"]
-            if fails:
-                print(f"\n失败 {len(fails)} 篇（原因见 progress_msg）:", flush=True)
-                for d in fails[:10]:
-                    msg = (d.get("progress_msg") or "").strip().splitlines()
-                    print(f"  - {d['name']}: {msg[-1] if msg else '(无)'}", flush=True)
-            return
+
+        if counts.get("RUNNING", 0) == 0:
+            idle_hits += 1
+            if idle_hits >= 2:  # 连续两次为空，确认不是波次间的空档
+                if counts.get("UNSTART", 0):
+                    print(f"\n本波结束：仍有 {counts['UNSTART']} 篇未触发解析，"
+                          f"再次运行本命令（可加 --wave N）继续。", flush=True)
+                fails = [d for d in docs if d.get("run") == "FAIL"]
+                if fails:
+                    print(f"\n失败 {len(fails)} 篇（原因见 progress_msg）:", flush=True)
+                    for d in fails[:10]:
+                        msg = (d.get("progress_msg") or "").strip().splitlines()
+                        print(f"  - {d['name']}: {msg[-1] if msg else '(无)'}", flush=True)
+                return
+        else:
+            idle_hits = 0
+
         if time.time() - t0 > timeout:
             print("等待超时，可用 --status-only 继续查看", flush=True)
             return
@@ -149,6 +172,11 @@ def main() -> int:
     ap.add_argument("--manifest", type=Path, default=MANIFEST)
     ap.add_argument("--group", choices=["trial", "papers", "books", "all"], default="trial")
     ap.add_argument("--batch-size", type=int, default=10)
+    ap.add_argument("--wave", type=int, default=0,
+                    help="本次最多触发解析 N 篇（0=不限）。用于分波提交，避免一次性打爆嵌入服务")
+    ap.add_argument("--retry-fail", action="store_true",
+                    help="只重试 FAIL 文档，不动 UNSTART（用于失败补救，避免重复提交已排队的文档）")
+    ap.add_argument("--upload-only", action="store_true", help="只上传，不触发解析")
     ap.add_argument("--wait", action="store_true", help="上传并触发解析后等待完成")
     ap.add_argument("--status-only", action="store_true", help="只打印进度，不上传不触发")
     ap.add_argument("--interval", type=int, default=30)
@@ -187,8 +215,19 @@ def main() -> int:
             print("  无新增文件，进入解析阶段", flush=True)
 
         docs = list_docs(ds["id"])
-        todo = [d["id"] for d in docs if d.get("run") in (None, "UNSTART", "FAIL")]
-        if todo:
+        if args.retry_fail:
+            todo = [d["id"] for d in docs if d.get("run") == "FAIL"]
+            print(f"  仅重试失败文档：{len(todo)} 篇", flush=True)
+        else:
+            todo = [d["id"] for d in docs if d.get("run") in (None, "UNSTART", "FAIL")]
+        if args.wave:
+            if len(todo) > args.wave:
+                print(f"  分波提交：本次触发 {args.wave} 篇，剩余 {len(todo) - args.wave} 篇待下次"
+                      f"（避免一次性打爆嵌入服务）", flush=True)
+            todo = todo[:args.wave]
+        if args.upload_only:
+            print("  --upload-only：已上传但不触发解析", flush=True)
+        elif todo:
             print(f"  触发解析 {len(todo)} 篇…", flush=True)
             trigger_parse(ds["id"], todo)
         if args.wait:

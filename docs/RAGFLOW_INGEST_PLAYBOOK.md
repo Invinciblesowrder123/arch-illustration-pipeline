@@ -92,19 +92,31 @@ python scripts/ragflow_ingest.py --group trial --wait
 ## 4. 全量入库
 
 ```bash
-# 论文组（159 篇，本次先跑这组）
+# 论文组
 python scripts/ragflow_ingest.py --group papers --wait --interval 60
 
-# 专著组（21 篇 / 7546 页，最慢，建议夜里跑）
-python scripts/ragflow_ingest.py --group books --wait --interval 60
+# 专著组（21 篇 / 7546 页，最慢，建议夜里跑；分波提交避免打爆嵌入服务）
+for i in 1 2 3 4 5 6; do python scripts/ragflow_ingest.py --group books --wave 5 --wait --interval 60; done
 
 # 只看进度（随时可查，可中断后续跑）
 python scripts/ragflow_ingest.py --group all --status-only
 ```
 
-脚本特性：按「库内已存在的文件名」去重 → 重复执行只补缺失；解析前挑出 `UNSTART/FAIL`
-再说；打印按页数估算的 ETA。**中断安全**：直接 Ctrl-C 或超时被杀都不影响服务端解析。
-**失败自动重试**：重跑同一条命令即会把 `FAIL` 的文档重新提交。
+脚本特性：按「库内已存在的文件名」去重 → 重复执行只补缺失；打印按页数估算的 ETA。
+**中断安全**：直接 Ctrl-C 或超时被杀都不影响服务端解析。
+
+常用开关：
+
+| 开关 | 用途 |
+|---|---|
+| `--wave N` | 本次最多触发 N 篇解析，其余留待下次。**首次入库或大部头务必分波**，一次性提交几百篇会把 TEI 打爆（排队 >30s 触发读超时失败） |
+| `--retry-fail` | 只重试 `FAIL` 文档，不动 `UNSTART`——避免把已排队的文档重复提交 |
+| `--upload-only` | 只上传不解析（先把文件送进库，等闲时再触发） |
+| `--status-only` | 只看进度 |
+| `--interval` / `--timeout` | 轮询间隔 / 等待上限 |
+
+> **退出条件说明**：`--wait` 以「连续两次采样无文档在跑」为结束条件（而不是"没有待解析文档"），
+> 因此 `--wave` 分波时不会因为剩下未触发的文档而永远等待；结束时它会明确提示还有多少篇未触发。
 
 ### 实测吞吐与 ETA（本机 8 核 / 32GB / bge-m3 / 2 并发 worker）
 
