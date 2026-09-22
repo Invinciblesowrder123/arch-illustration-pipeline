@@ -285,6 +285,157 @@ class TestPipelineRagMode(unittest.TestCase):
                 pipeline.run(cfg, "画东西")
 
 
+class TestCheckRagflow(unittest.TestCase):
+    """check.check_ragflow：鉴权 / dataset 存在性 / 检索通路三级探测。"""
+
+    def _cfg(self):
+        cfg = _fake_config("rag")
+        cfg.ragflow_dataset_ids = ["ds1"]
+        return cfg
+
+    def test_ok(self):
+        import check
+        fake = MagicMock()
+        fake.list_datasets.return_value = [{"id": "ds1", "name": "考古文献库"}]
+        fake.retrieve.return_value = [{"content": "片段", "document_name": "a.pdf",
+                                       "page": 1, "similarity": 0.5, "keywords": []}]
+        with patch.object(check, "RAGFlowClient", return_value=fake):
+            ok, detail = check.check_ragflow(self._cfg())
+        self.assertTrue(ok)
+        self.assertIn("命中 1 片段", detail)
+        # 探测检索用 0 阈值，以便区分"通路坏"与"库为空"
+        self.assertEqual(fake.retrieve.call_args.kwargs["similarity_threshold"], 0.0)
+
+    def test_dataset_missing(self):
+        import check
+        fake = MagicMock()
+        fake.list_datasets.return_value = [{"id": "other", "name": "别的库"}]
+        with patch.object(check, "RAGFlowClient", return_value=fake):
+            ok, detail = check.check_ragflow(self._cfg())
+        self.assertFalse(ok)
+        self.assertIn("dataset 不存在", detail)
+        fake.retrieve.assert_not_called()
+
+    def test_empty_library_vs_unreachable(self):
+        import check
+        fake = MagicMock()
+        fake.list_datasets.return_value = [{"id": "ds1", "name": "考古文献库"}]
+        fake.retrieve.return_value = []
+        with patch.object(check, "RAGFlowClient", return_value=fake):
+            ok, detail = check.check_ragflow(self._cfg())
+        self.assertFalse(ok)
+        self.assertIn("零命中", detail)
+
+    def test_unreachable(self):
+        import check
+        with patch.object(check, "RAGFlowClient",
+                          side_effect=RagflowError("RAGFlow 请求失败: POST /retrieval")):
+            ok, detail = check.check_ragflow(self._cfg())
+        self.assertFalse(ok)
+        self.assertIn("RAGFLOW_BASE_URL", detail)
+
+    def test_run_checks_skips_when_unconfigured(self):
+        import check
+        cfg = _fake_config("local")
+        cfg.ragflow_base_url, cfg.ragflow_api_key, cfg.ragflow_dataset_ids = "", "", []
+        with patch.object(check, "check_llm", return_value=(True, "ok")), \
+             patch.object(check, "check_vision", return_value=(True, "ok")), \
+             patch.object(check, "check_ragflow") as mock_rag:
+            ok = check.run_checks(cfg, skip_image=True)
+        self.assertTrue(ok)
+        mock_rag.assert_not_called()  # 未配置 RAGFlow 时不探测
+
+    def test_run_checks_includes_ragflow_when_configured(self):
+        import check
+        cfg = self._cfg()
+        with patch.object(check, "check_llm", return_value=(True, "ok")), \
+             patch.object(check, "check_vision", return_value=(True, "ok")), \
+             patch.object(check, "check_ragflow", return_value=(True, "知识层可达")) as mock_rag:
+            ok = check.run_checks(cfg, skip_image=True)
+        self.assertTrue(ok)
+        mock_rag.assert_called_once()
+
+    def test_run_checks_fails_when_ragflow_fails(self):
+        import check
+        cfg = self._cfg()
+        with patch.object(check, "check_llm", return_value=(True, "ok")), \
+             patch.object(check, "check_vision", return_value=(True, "ok")), \
+             patch.object(check, "check_ragflow", return_value=(False, "不可达")):
+            ok = check.run_checks(cfg, skip_image=True)
+        self.assertFalse(ok)
+
+
+class _FakeChatClient:
+    """按调用次数决定抛错或返回内容的假客户端。"""
+
+    def __init__(self, fail_times: int = 0, persist_marker: bool = False,
+                 message: str = "Upstream rejected illegal short-input distillation or heartbeat probing."):
+        self.state = {"n": 0, "msg": message}
+        self.fail_times = fail_times
+        self.persist_marker = persist_marker
+
+    def __call__(self, *a, **kw):
+        return self
+
+    # 模拟 OpenAI(api_key=..., base_url=..., timeout=...)
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kw):
+        self.state["n"] += 1
+        if self.persist_marker or self.state["n"] <= self.fail_times:
+            raise Exception(f"Error code: 400 - {{'error': {{'message': '{self.state['msg']}'}}}}")
+        return MagicMock(choices=[MagicMock(message=MagicMock(content='{"ok": true, "summary": "地层学"}'))])
+
+
+class TestCheckLlmProbe(unittest.TestCase):
+    """文本探针：真实任务提示词 + 短输入风控自动加长重试。"""
+
+    def _cfg(self):
+        return _fake_config("local")
+
+    def test_ok_first_try(self):
+        import check
+        fake = _FakeChatClient()
+        with patch.object(check, "OpenAI", fake):
+            ok, detail = check.check_llm(self._cfg())
+        self.assertTrue(ok)
+        self.assertEqual(fake.state["n"], 1)
+        self.assertNotIn("加长", detail)
+
+    def test_retry_on_short_input_guard(self):
+        import check
+        fake = _FakeChatClient(fail_times=1)  # 首轮被风控拦，加长后通过
+        with patch.object(check, "OpenAI", fake):
+            ok, detail = check.check_llm(self._cfg())
+        self.assertTrue(ok)
+        self.assertEqual(fake.state["n"], 2)
+        self.assertIn("加长", detail)
+
+    def test_guard_persists(self):
+        import check
+        fake = _FakeChatClient(persist_marker=True)
+        with patch.object(check, "OpenAI", fake):
+            ok, detail = check.check_llm(self._cfg())
+        self.assertFalse(ok)
+        self.assertIn("风控", detail)
+        self.assertEqual(fake.state["n"], 2)  # 只重试一次，不无限重试
+
+    def test_other_error_no_retry(self):
+        import check
+        fake = _FakeChatClient(fail_times=1, message="invalid api key")
+        with patch.object(check, "OpenAI", fake):
+            ok, detail = check.check_llm(self._cfg())
+        self.assertFalse(ok)
+        self.assertIn("invalid api key", detail)
+        self.assertEqual(fake.state["n"], 1)  # 非风控错误不重试
+
+
 class TestConfigModeResolution(unittest.TestCase):
     def test_rag_requires_config(self):
         from config import ConfigError, load_config

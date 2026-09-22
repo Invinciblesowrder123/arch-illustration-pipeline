@@ -142,7 +142,7 @@ python main.py
 | 命令 | 作用 |
 |---|---|
 | `python main.py` | 正式生成插图 |
-| `python main.py --check` | 模型连通性自检（文本/读图/绘图各实测一次） |
+| `python main.py --check` | 模型连通性自检（文本/读图/绘图各实测一次；配了 RAGFlow 还会测知识层检索通路） |
 | `python main.py --check --skip-image` | 自检但跳过绘图测试（不产生绘图费用） |
 | `python main.py --dry-run` | 只检查文献能否正常读取，不花钱 |
 | `python main.py --max-attempts 5` | 增加自动重绘轮数 |

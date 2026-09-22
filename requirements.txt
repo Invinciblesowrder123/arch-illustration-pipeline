@@ -4,3 +4,12 @@ PyMuPDF>=1.24.0
 python-docx>=1.1.0
 ddgs>=9.0.0
 requests>=2.31.0
+
+# ---- RAGFlow 知识层（--mode rag）----
+# 无需额外依赖：通过上面的 requests 直接调用 RAGFlow HTTP API（ragflow_client.py），
+# 不安装 ragflow-sdk，也不需要本机装 docker —— RAGFlow 服务端由教授侧单独部署，
+# 本机只要能用 HTTP 访问到它（RAGFLOW_BASE_URL）即可。
+# 环境探测：python main.py --check
+#   配好 RAGFLOW_BASE_URL / RAGFLOW_API_KEY / RAGFLOW_DATASET_ID 后自动追加
+#   "RAGFlow 知识层" 一项：校验鉴权、dataset 是否存在、并真实检索一次（零模型费用）。
+# 只想测检索通路不跑全量自检：python main.py --dry-run --mode rag

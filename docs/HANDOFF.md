@@ -17,7 +17,9 @@
 ## 2. 当前状态（2026-09-22）
 
 - ✅ 六阶段流水线全部真机验收通过（含扫描版 PDF 视觉直读端到端）
-- ✅ 双 Key 首启向导、连通性自检（`--check`）、MinerU 通用探测与解析（子进程已修 GBK 编码崩溃）
+- ✅ 双 Key 首启向导、连通性自检（`--check`：文本/读图/绘图三项 + 配置了 RAGFlow 时
+  自动追加"RAGFlow 知识层"一项，校验鉴权 / dataset 存在性 / 真实检索通路）、
+  MinerU 通用探测与解析（子进程已修 GBK 编码崩溃）
 - ✅ 架构设计定稿：`docs/RAGFLOW_ARCHITECTURE.md`（方案 A：RAGFlow 只做知识层）
 - ✅ **P2 代码完成**：`ragflow_client.py` + `--mode rag/local` 双模式 + 引用溯源报告，
   mock 单测 19 项全绿（`tests/test_rag_mode.py`，运行方式见文件头注释）
@@ -78,3 +80,10 @@
 4. 同一文件多个 Edit 不能并行发（后一个会基于旧版本覆盖前一个）——串行改，改完回读验证
 5. 1×1 像素测试图会被多模态服务判无效图 → 用真实小图（`check.py` 里 `_tiny_png`）
 6. Windows GBK 控制台 + 特殊 Unicode 输出会崩子进程 → 子进程 env 强制 UTF-8
+7. **aixw 短输入风控（2026-09-22 新发现）**：上游会拒绝"极短提示词"，报
+   `Upstream rejected illegal short-input distillation or heartbeat probing`（400）。
+   触发条件：输入过短（实测 155 字那条 1 秒内被拒，267 字正常任务 16 秒通过），
+   且**对重复出现的同一短提示词更敏感**。`check.py` 的探针已改为真实知识整理任务
+   （约 270 字）+ 被拦时自动加长重试；**新增任何探测/健康检查逻辑时不要把提示词写短**。
+   另注意：该风控判定会让响应延迟到 70s+，`check.py` 的 `CHECK_TIMEOUT=180`
+   就是为此设的——超时设小了会把"上游慢"误报成"链路不通"。
