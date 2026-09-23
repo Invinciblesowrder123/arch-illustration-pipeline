@@ -224,9 +224,12 @@ docker compose ps                      # 各容器应 healthy / Up
 cd D:\AI\Painter
 python main.py --check --skip-image
 
-# 继续入库：论文组补跑并等排空，随后专著组分波推进
-python scripts\ragflow_ingest.py --group papers --wait --interval 60
-for ($i=1; $i -le 4; $i++) { python scripts\ragflow_ingest.py --group books --wave 5 --wait --interval 60 }
+# 继续入库：论文组补齐 + 专著组分波（都带自愈，可无人值守）
+# 注意 --include-running：暂停/重启会留下卡在 RUNNING 的文档，不带这个开关它们永远不动
+python scripts\ragflow_ingest.py --group papers --include-running --wait --interval 60 --auto-restart
+for ($i=1; $i -le 4; $i++) {
+  python scripts\ragflow_ingest.py --group books --include-running --wave 6 --wait --interval 60 --auto-restart --stall-minutes 20
+}
 
 # 只看进度
 python scripts\ragflow_ingest.py --group all --status-only
@@ -234,9 +237,10 @@ python scripts\ragflow_ingest.py --group all --status-only
 
 **关于断点**：
 
-- 暂停时"正在解析"的文档会中断（重启后状态多为 `FAIL` 或回到 `UNSTART`）——
-  入库脚本会把 `UNSTART/FAIL` 一起重新触发，**不需要手工处理**。
-- 未触发的文档（`UNSTART`）同样由脚本重新触发。
+- 暂停时"正在解析"的文档会中断（重启后状态多为 `FAIL` 或**仍是 `RUNNING` 但进度为 0%**）
+  ——入库脚本会把 `UNSTART/FAIL` 自动重新触发，但**卡在 `RUNNING` 的必须带 `--include-running`**
+  （否则它们永远停着，2026-09-22 实测踩到）。
+- 未触发的文档（`UNSTART`）由脚本自动重新触发。
 - 已 `DONE` 的文档与向量都在 ES / MySQL 卷里，**不会重跑**。
 - 断点快照见 `knowledge/ingest_checkpoint.md`（含各库完成数、chunk 与 token 量）。
 
