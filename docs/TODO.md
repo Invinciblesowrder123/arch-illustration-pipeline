@@ -1,5 +1,9 @@
 # 待开发清单（TODO）
 
+> **⚠️ 开发需求以 `docs/DEV_TASKS.md`（v1.1.0 开发任务书）为准**，本文件仅作历史记录与补充。
+> 项目已转向 **RAGFlow 知识层新框架**：与旧框架（本地重型解析：MinerU / 结构感知选段 /
+> 递归扫描 references 等）相关的事项**一律不纳入开发清单**（详见任务书 §1.2）。
+
 > 约定：事项按优先级排列；完成即移入文末「已完成」并注明提交号。
 > 需要拍板的事项标 ⏸，被其他方案替代而关闭的标 ✕。
 
@@ -31,19 +35,18 @@
   停栈、是否设为开机自启、以及 `restart: unless-stopped` 是否改掉。停栈命令见
   `D:\AI\RAGFlow\README.md` §3。
 
-- [ ] **入库调优环节（P1.5，配合 RAGFlow）**
+- [ ] **入库调优环节（P1.5，配合 RAGFlow）** → 已并入 `DEV_TASKS.md` **T8 检索回归集**
   全量入库前先做「试切-评估-调参」：挑 10 篇代表性文献试切，用 20 组典型需求
   作为检索回归集测命中率，调优 chunk 方法/长度/分隔符与 embedding 模型后再全量导入。
   设计详见 `docs/RAGFLOW_ARCHITECTURE.md` §7。
 
-- [ ] **跨平台启动脚本与编码规范**
-  教授侧曾出现 .bat 用 UTF-8 保存中文导致 cmd 按 GBK 读取乱码、行尾混入双回车、
-  uv 不在 PATH 等问题（本地已手工修复，仓库侧无此脚本）。
-  待开发：① 仓库提供 `start.bat`（GBK/ASCII 编码 + CRLF，自动补 PATH）
-  与 `start.sh`（UTF-8 + LF），并加 CI 行尾检查；② .editorcal / .gitattributes
-  统一文本编码与行尾；③ Python 侧统一 ruff/black 格式规范。
-
 ## 已被替代 / 暂缓
+
+- [x] ✕ **跨平台启动脚本与编码规范（.bat / .sh / 行尾）**
+  原属旧架构交付形态（双击 bat 启动本地流水线）。新框架下启动还需先起 RAGFlow
+  容器栈（`docker compose up -d --pull never`），单纯一个 bat 解决不了启动问题，
+  且用户已明确：**与旧框架相关的不纳入开发清单**，故关闭。
+  如日后需要"一键起栈 + 跑流水线"，按新框架重新提需求。
 
 - [x] ✕ **MinerU 4.x Windows 控制台 Unicode 崩溃**
   根因：MinerU 子进程在 GBK 控制台打印特殊 Unicode 字符报
