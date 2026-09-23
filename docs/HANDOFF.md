@@ -87,11 +87,15 @@
 - Python 项目 venv：`D:/AI/Painter/.venv`（依赖已装好）
 - MinerU：`D:/AI/R/.venv-mineru`（探测逻辑会自动发现，无需写死路径）
 - 教授文献：215 篇在 `references/`（已被 .gitignore 排除，仅在本地）
-- **代理坑（必读）**：shell 环境变量代理指向 127.0.0.1:10939（死端口）；
-  实际可用代理是 **127.0.0.1:7890**。git/gh 联网操作需前缀
-  `HTTPS_PROXY=http://127.0.0.1:7890`；gh 首次 push 若被 LFS locks 断连，
-  执行 `git config lfs.<仓库url>/info/lfs.locksverify false`
+- **代理坑（必读）**：shell 环境变量里的代理端口**会随本机代理软件变化**，别照抄旧端口。
+  排查步骤：先 `curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://github.com` 测代理，
+  再 `curl ... --noproxy '*'` 测直连。**2026-09-23 实测：环境里的 `127.0.0.1:8041` 不通
+  （HTTP 000 超时），直连可用（HTTP 200，1.5s）** —— 此时 git/gh 联网要显式绕开代理：
+  `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git push origin main --tags`。
+  （历史记录里的 10939 / 7890 同理，都要当场测，不要盲信。）
 - git 身份：本仓库用 repo-local config（Invinciblesowrder123 + noreply 邮箱）
+- 发布流程：`git tag -a v<版本> -m "…"` → push main 与 tags → `gh release create v<版本> --notes-file <文件>`
+  （`--notes-file` 用文件而不是 heredoc：命令行里出现 `powershell` 字样会被本机安全策略误判拦截）
 
 ## 6. 已知坑（都踩过，别再踩）
 
