@@ -82,6 +82,41 @@
   `Ragflow@2026`，仅本地测试用）；教授正式环境的地址/Key/ID 需另行提供 |
 | 本机环境事实 | 见下方「机器环境备忘」，只对当前这台 Windows 机有效 |
 
+### ★ RAGFlow 内存实测更正（2026-09-24）——别再照"16GB 跑不动"下结论
+
+文档（架构 §10.1）原先写"bge-m3 独占 17.1GB、16GB 服务器跑不动"，**那是把 TEI 的默认并发
+缓冲区当成了模型开销**。TEI 默认 `max-concurrent-requests=512` / `max-batch-tokens=16384`，
+会预分配巨大缓冲。在 `docker-compose-base.yml` 的 `tei-cpu.command` 里加上限即可**无损**降压
+（模型不变 → 已入库向量全部有效，无需重算）：
+
+```yaml
+command: ["--model-id", "/data/${TEI_MODEL}", "--auto-truncate",
+          "--max-concurrent-requests", "8",
+          "--max-batch-tokens", "4096",
+          "--max-client-batch-size", "16"]
+```
+
+| | 默认 | 加上限后 |
+|---|---|---|
+| TEI 常驻 | 17.1 GB | **4.98 GB** |
+| 整栈 | ~20.5 GB | ~8.2 GB |
+| 宿主可用（本机 32GB） | 0.5 GB（98%，容器随时 Exit 137） | 11.7 GB（62%） |
+| 入库吞吐 | 3-5 页/分钟 | 4.2-6.5 页/分钟 |
+
+**结论：16GB 服务器可跑 bge-m3，不必换 0.6B 模型，也不必 ≥32GB。**
+
+### 入库恢复（当前正在跑）
+
+```powershell
+cd D:\AI\RAGFlow\ragflow\docker
+docker compose up -d --pull never      # 起栈
+cd D:\AI\Painter
+python main.py --dry-run --mode rag --requirement "..."   # 零费用验检索
+python scripts\ragflow_ingest.py --group papers --include-running --retry-fail `
+  --wait --interval 60 --auto-restart --stall-minutes 20   # 论文组补齐
+python scripts\ragflow_ingest.py --group all --status-only  # 看进度
+```
+
 ### 机器环境备忘（Windows，当前开发机）
 
 - Python 项目 venv：`D:/AI/Painter/.venv`（依赖已装好）

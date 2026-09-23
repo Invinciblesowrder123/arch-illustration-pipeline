@@ -135,10 +135,37 @@ Authorization: Bearer {RAGFLOW_API_KEY}
 2. `TEI_MODEL` 与镜像内模型名一致
 3. 租户默认嵌入 + **dataset 的 `embd_id`**（格式 `<模型名>@Builtin`）
 
-**内存实测（bge-m3 / CPU / 8 workers）：TEI 独占 17.1GB**，整栈约 20.5GB。
-即 **16GB 服务器跑不动 bge-m3 版**（这正是官方 .env 里"bge-m3 需 21GB"的含义）。
-P1 选型三选一：① 服务器 ≥32GB 内存；② `TEI_MODEL=Qwen/Qwen3-Embedding-0.6B`（预期约 5GB）；
-③ 嵌入走外部 API。**此决策需在 215 篇入库前定，因为换模型要重算全库向量。**
+**内存实测（bge-m3 / CPU / 8 workers，默认参数）：TEI 独占 17.1GB**，整栈约 20.5GB。
+
+### 10.1.1 ★ 2026-09-24 更正：17GB 不是模型本身，是 TEI 的并发缓冲区
+
+默认 `command` 只有 `--model-id` 和 `--auto-truncate`，TEI 会按
+`--max-concurrent-requests=512` / `--max-batch-tokens=16384` 的默认值**预分配批处理缓冲区**——
+这才是那 17GB 的绝大部分。给 `docker-compose-base.yml` 的 `tei-cpu` 段加上限后：
+
+```yaml
+command: ["--model-id", "/data/${TEI_MODEL}", "--auto-truncate",
+          "--max-concurrent-requests", "8",
+          "--max-batch-tokens", "4096",
+          "--max-client-batch-size", "16"]
+```
+
+实测结果（同一模型 bge-m3、同一批已入库向量）：
+
+| | 默认参数 | 加上限后 |
+|---|---|---|
+| TEI 常驻内存 | **17.1 GB** | **4.98 GB** |
+| 整栈 | 约 20.5 GB | 约 8.2 GB |
+| 宿主可用内存（本机 32GB） | 0.5 GB（占用 98%，容器随时 OOM kill / Exit 137） | 11.7 GB（占用 62%） |
+| 入库吞吐 | 3-5 页/分钟（还伴随 OOM 风险） | **4.2-6.5 页/分钟** |
+
+**结论重写**：bge-m3 完全可以在 16GB 服务器上跑（整栈 ~8GB + 系统开销），
+**不需要换 0.6B 模型，也不需要 ≥32GB 机器**。之前"16GB 跑不动"的判断是把
+"默认配置的 TEI"当成了"bge-m3 模型本身"的开销。
+
+> 注意：改的是并发上限，**不是模型**——已入库向量全部有效，无需重算。
+> 吞吐不降反升，因为不再跟 pagefile 抢内存。若要继续压内存，下一步可以再降
+> `--max-batch-tokens`（但会拉长长文档的嵌入耗时）。
 
 ### 10.2 已核验的检索 API 差异（P2 客户端已按此修正）
 

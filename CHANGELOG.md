@@ -5,6 +5,28 @@
 
 ---
 
+## [Unreleased]
+
+### 部署实测更正（2026-09-24）——改写了"16GB 机器跑不动"的结论
+
+- **TEI 常驻内存 17.1GB → 4.98GB，整栈 20.5GB → 约 8.2GB**：bge-m3 那 17GB
+  **不是模型本身，而是 TEI 的并发缓冲区**（默认 `--max-concurrent-requests=512` /
+  `--max-batch-tokens=16384` 会预分配巨大批处理缓冲）。给 `docker-compose-base.yml`
+  的 `tei-cpu.command` 加上 `--max-concurrent-requests 8 --max-batch-tokens 4096
+  --max-client-batch-size 16` 即可**无损**降压——模型不变，**已入库向量全部有效，无需重算**。
+- **结论改写**：**16GB 内存的服务器就能跑 bge-m3**，既不必换 `Qwen/Qwen3-Embedding-0.6B`，
+  也不必强求 ≥32GB。此前 §10.1 的判断是把"默认配置的 TEI"当成了"bge-m3 模型本身"的开销。
+  这条同时改变了给教授清单里"服务器规格"那一栏的口径（已同步更新 MD 与 PDF）。
+- 宿主可用内存 0.5GB（占用 98%，容器随时被 OOM kill / Exit 137）→ **11.7GB（62%）**；
+  入库吞吐 3-5 页/分钟 → **4.2-6.5 页/分钟**（不再与 pagefile 抢内存，反而更快）。
+
+### 进行中
+
+- **T7 论文组补齐**：`--group papers --include-running --retry-fail --wait --auto-restart`
+  已启动（143 → 目标 168 篇）。专著组 `books_b`（14 本 / 5108 页）待排期。
+
+---
+
 ## [1.1.0] — 2026-09-23 · 指定重绘 + 图内文字约束
 
 教授拿到图之后能"提意见"了。此前只有"模型自己判不通过 → 自动重绘"一条路，
