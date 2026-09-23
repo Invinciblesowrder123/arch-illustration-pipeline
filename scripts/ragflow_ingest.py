@@ -51,8 +51,8 @@ def _h() -> dict:
 
 
 def list_datasets() -> list[dict]:
-    r = requests.get(f"{API}/datasets", headers=_h(), timeout=60).json()
-    return r.get("data") or []
+    r = _safe_json(requests.get(f"{API}/datasets", headers=_h(), timeout=60))
+    return (r or {}).get("data") or []
 
 
 def pick_dataset(datasets: list[dict], chunk_method: str) -> dict:
@@ -65,9 +65,9 @@ def pick_dataset(datasets: list[dict], chunk_method: str) -> dict:
 def list_docs(dataset_id: str) -> list[dict]:
     out, page = [], 1
     while True:
-        r = requests.get(f"{API}/datasets/{dataset_id}/documents", headers=_h(),
-                         params={"page": page, "page_size": 100}, timeout=120).json()
-        data = r.get("data") or {}
+        r = _safe_json(requests.get(f"{API}/datasets/{dataset_id}/documents", headers=_h(),
+                                    params={"page": page, "page_size": 100}, timeout=120))
+        data = (r or {}).get("data") or {}
         docs = data.get("docs") or []
         out.extend(docs)
         if len(out) >= (data.get("total") or 0) or not docs:
@@ -101,22 +101,64 @@ def upload(dataset_id: str, files: list[Path], batch_size: int) -> list[str]:
     return uploaded
 
 
+def _safe_json(r) -> dict | None:
+    """把响应就地拦成"可解析的 JSON 或 None"。
+
+    为什么必须有：容器刚重启（或上游未就绪）时，接口会返回 HTML 错误页、502 或空响应。
+    直接 `.json()` 会抛 JSONDecodeError 让**无人值守的入库脚本整个崩掉**——
+    2026-09-24 实测：停摆自愈重启容器后立刻触发解析，撞上非 JSON 响应，脚本退出。
+    """
+    if r is None or r.status_code != 200:
+        return None
+    text = (r.text or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        return r.json()
+    except ValueError:
+        return None
+
+
+def _wait_api_ready(timeout: int = 300, interval: int = 5) -> bool:
+    """等 `/api/v1` 真正可用——Web 首页（静态资源）会先于 API 就绪。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{API}/datasets", headers=_h(),
+                             params={"page": 1, "page_size": 1}, timeout=10)
+            if _safe_json(r) is not None:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(interval)
+    return False
+
+
 def trigger_parse(dataset_id: str, doc_ids: list[str], batch: int = 10, attempts: int = 3) -> int:
     """触发解析。小批量 + 失败重试（文档多时接口会偶发 Internal server error）。
 
-    返回成功触发的文档数。
+    返回成功触发的文档数。**任何单次失败都不许让脚本崩掉**——最多打印并跳过。
     """
     ok = 0
     for i in range(0, len(doc_ids), batch):
         chunk = doc_ids[i:i + batch]
         for k in range(attempts):
-            r = requests.post(f"{API}/datasets/{dataset_id}/documents/parse", headers=_h(),
-                              json={"document_ids": chunk}, timeout=300).json()
-            if r.get("code") == 0:
+            body, why = None, ""
+            try:
+                r = requests.post(f"{API}/datasets/{dataset_id}/documents/parse", headers=_h(),
+                                  json={"document_ids": chunk}, timeout=300)
+                body = _safe_json(r)
+                if body is None:
+                    why = f"HTTP {r.status_code} 返回非 JSON（服务可能尚未就绪），" \
+                          f"前 80 字: {(r.text or '')[:80]!r}"
+            except requests.RequestException as e:
+                why = f"请求异常 {type(e).__name__}: {str(e)[:120]}"
+            if body is not None and body.get("code") == 0:
                 ok += len(chunk)
                 break
             if k == attempts - 1:
-                print(f"  ✗ 触发解析失败（已重试 {attempts} 次）: {r.get('message')}", flush=True)
+                msg = (body or {}).get("message") or why
+                print(f"  ✗ 触发解析失败（已重试 {attempts} 次）: {msg}", flush=True)
             else:
                 time.sleep(5 * (k + 1))
     return ok
@@ -158,15 +200,21 @@ def _restart_ragflow_container() -> bool:
     if r.returncode != 0:
         print(f"  ✗ 重启失败: {(r.stderr or '').strip()[:200]}", flush=True)
         return False
-    # 等 Web 起来
+    # 先等 Web 首页（静态资源先行）
     for _ in range(30):
         try:
             if requests.get(f"{BASE}/", timeout=5).status_code in (200, 302, 308):
-                return True
+                break
         except requests.RequestException:
             pass
         time.sleep(5)
-    return False
+    # 再等 API 真正就绪：只等首页就触发解析，会撞上非 JSON 响应（2026-09-24 实测踩到）
+    print("  ⏳ 等待 /api/v1 就绪…", flush=True)
+    if not _wait_api_ready():
+        print("  ✗ API 300s 内未就绪，后续触发可能失败（可稍后手动再跑一次本命令）", flush=True)
+        return False
+    print("  ✓ API 已就绪", flush=True)
+    return True
 
 
 def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,

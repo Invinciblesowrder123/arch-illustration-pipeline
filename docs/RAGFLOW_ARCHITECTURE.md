@@ -164,8 +164,21 @@ command: ["--model-id", "/data/${TEI_MODEL}", "--auto-truncate",
 "默认配置的 TEI"当成了"bge-m3 模型本身"的开销。
 
 > 注意：改的是并发上限，**不是模型**——已入库向量全部有效，无需重算。
-> 吞吐不降反升，因为不再跟 pagefile 抢内存。若要继续压内存，下一步可以再降
-> `--max-batch-tokens`（但会拉长长文档的嵌入耗时）。
+> 吞吐不降反升，因为不再跟 pagefile 抢内存。
+
+#### ⚠️ 并发数别调太小（2026-09-24 踩到）
+
+一度把 `--max-concurrent-requests` 设成 `8`，结果 **RAGFlow 解析时的并发嵌入请求被拒**，
+文档直接 FAIL 并报：
+
+```
+[ERROR][Exception]: HTTPConnectionPool(host='tei', port=80): ...
+```
+
+**内存大头其实是 `--max-batch-tokens`（16384 → 4096 就够降压），不是并发数**——
+把并发从 8 提到 **64**，TEI 内存仍是 **4.97GB**（几乎不变），health 200，也不再 FAIL。
+结论：`--max-concurrent-requests 64 --max-batch-tokens 4096 --max-client-batch-size 16`。
+若要继续压内存，下一步应动 `--max-batch-tokens`（会拉长长文档的嵌入耗时），而不是并发。
 
 ### 10.2 已核验的检索 API 差异（P2 客户端已按此修正）
 
