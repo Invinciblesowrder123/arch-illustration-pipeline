@@ -171,7 +171,8 @@ def _restart_ragflow_container() -> bool:
 
 def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
               wave_mode: bool = False, auto_restart: bool = False,
-              stall_minutes: int = 15, executor_log: str = "") -> None:
+              stall_minutes: int = 15, executor_log: str = "",
+              allowed: set | None = None) -> None:
     """轮询到没有文档在跑为止，并检测"执行器停摆"。
 
     退出条件分两种（用 --wave 区分）：
@@ -194,10 +195,18 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
     last_progress_at = time.time()
     restarts = 0
     _, docs0 = progress_snapshot(dataset_id)
+    if allowed is not None:
+        docs0 = [d for d in docs0 if d.get("name") in allowed]
     base_done = sum(1 for d in docs0 if d.get("run") == "DONE")
     base_pages = sum(page_map.get(d["name"], 0) for d in docs0 if d.get("run") == "DONE")
     while True:
         counts, docs = progress_snapshot(dataset_id)
+        if allowed is not None:
+            docs = [d for d in docs if d.get("name") in allowed]
+            counts = {}
+            for d in docs:
+                k = d.get("run") or "UNSTART"
+                counts[k] = counts.get(k, 0) + 1
         done_pages = sum(page_map.get(d["name"], 0) for d in docs if d.get("run") == "DONE")
         total_pages = sum(page_map.get(d["name"], 0) for d in docs)
         elapsed = time.time() - t0
@@ -281,7 +290,8 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
 def main() -> int:
     ap = argparse.ArgumentParser(description="RAGFlow 批量入库（可续跑）")
     ap.add_argument("--manifest", type=Path, default=MANIFEST)
-    ap.add_argument("--group", choices=["trial", "papers", "books", "all"], default="trial")
+    ap.add_argument("--group", choices=["trial", "papers", "books", "books_b", "all"], default="trial",
+                    help="trial=试切批次；papers=论文组；books=全部专著；books_b=专著择优清单（manifest 的 books_b，14 本/5108 页）；all=全部")
     ap.add_argument("--batch-size", type=int, default=10)
     ap.add_argument("--wave", type=int, default=0,
                     help="本次最多触发解析 N 篇（0=不限）。用于分波提交，避免一次性打爆嵌入服务")
@@ -316,6 +326,8 @@ def main() -> int:
         groups = [("paper", man.get("papers") or [])]
     elif args.group == "books":
         groups = [("book", man.get("books") or [])]
+    elif args.group == "books_b":
+        groups = [("book", man.get("books_b") or [])]
     else:
         groups = [("paper", man.get("papers") or []), ("book", man.get("books") or [])]
 
@@ -324,8 +336,10 @@ def main() -> int:
         if not names:
             continue
         ds = pick_dataset(datasets, chunk_method)
+        allowed = set(names)
         print(f"\n=== {ds['name']}（{chunk_method} 切片，本次 {len(names)} 篇）===", flush=True)
-        existing = {d.get("name") for d in list_docs(ds["id"])}
+        all_docs = list_docs(ds["id"])
+        existing = {d.get("name") for d in all_docs}
         pending = [REFS / n for n in names if n not in existing and (REFS / n).exists()]
 
         if args.status_only:
@@ -339,7 +353,8 @@ def main() -> int:
         else:
             print("  无新增文件，进入解析阶段", flush=True)
 
-        docs = list_docs(ds["id"])
+        # 只对本组清单内的文件动手（books_b 择优清单能排除暂不跑的专著）
+        docs = [d for d in all_docs if d.get("name") in allowed]
         if args.retry_fail:
             todo = [d["id"] for d in docs if d.get("run") == "FAIL"]
             print(f"  仅重试失败文档：{len(todo)} 篇", flush=True)
@@ -361,7 +376,8 @@ def main() -> int:
         if args.wait:
             wait_done(ds["id"], man.get("page_map") or {}, args.interval, args.timeout,
                       wave_mode=bool(args.wave), auto_restart=args.auto_restart,
-                      stall_minutes=args.stall_minutes, executor_log=args.executor_log)
+                      stall_minutes=args.stall_minutes, executor_log=args.executor_log,
+                      allowed=allowed)
         else:
             counts, _ = progress_snapshot(ds["id"])
             print(f"  已提交，当前状态 {counts}（用 --status-only 查看进度）", flush=True)
