@@ -110,11 +110,12 @@
 ```powershell
 git clone https://github.com/Invinciblesowrder123/arch-illustration-pipeline.git
 cd arch-illustration-pipeline
-git checkout v1.1.0
 pip install -r requirements.txt
 ```
 
-若之前已克隆过，直接 `git pull --tags` 即拿到 v1.1.0。
+- 默认拿到的就是最新主线（含本清单）。已克隆过则 `git pull` 即可。
+- 右边栏 **Releases** 页有 v1.1.0 的发布说明（这一版改了什么、怎么用）。
+- 若本机没装 git：在仓库页面点 `Code` → `Download ZIP`，解压同样可用。
 
 ### 4.2 填密钥
 
