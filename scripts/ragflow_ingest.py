@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -128,9 +129,29 @@ def progress_snapshot(dataset_id: str) -> tuple[dict, list[dict]]:
     return counts, docs
 
 
+def _restart_ragflow_container() -> bool:
+    """重启 RAGFlow 容器让卡死的 task_executor 复活（仅在 --auto-restart 时调用）。"""
+    name = os.environ.get("RAGFLOW_CONTAINER", "docker-ragflow-cpu-1")
+    print(f"  ⇄ 重启容器 {name} 以复活卡死的 task_executor…", flush=True)
+    r = subprocess.run(["docker", "restart", name], capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        print(f"  ✗ 重启失败: {(r.stderr or '').strip()[:200]}", flush=True)
+        return False
+    # 等 Web 起来
+    for _ in range(30):
+        try:
+            if requests.get(f"{BASE}/", timeout=5).status_code in (200, 302, 308):
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(5)
+    return False
+
+
 def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
-              wave_mode: bool = False) -> None:
-    """轮询到没有文档在跑为止。ETA 按页数估算（文档数会被大部头带偏）。
+              wave_mode: bool = False, auto_restart: bool = False,
+              stall_minutes: int = 15) -> None:
+    """轮询到没有文档在跑为止，并检测"执行器停摆"。
 
     退出条件分两种（用 --wave 区分）：
     - 整库模式（默认）：RUNNING==0 **且** UNSTART==0 才算跑完——否则整库排队时
@@ -138,10 +159,19 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
       就被判结束，脚本跳去跑专著组）。
     - 分波模式（--wave N）：只看 RUNNING==0，因为剩余未触发的文档本来就该留到下一波。
     两种情况都要求**连续两次采样**满足条件，避免波次间空档误判。
+
+    停摆检测（2026-09-23 血的教训）：TEI 读超时多次之后，task_executor 会**静默停摆**
+    ——进程还在、CPU 归零、日志不再写，但文档状态仍是 RUNNING 且进度停在 0%。
+    此时队列不会自己恢复，必须重启容器。故：
+      · 连续 stall_minutes 分钟「无任何文档完成」且仍有 RUNNING → 判定停摆，先补触发，
+        再等一轮；仍无进展且开了 --auto-restart → 重启容器。
     """
     t0 = time.time()
     idle_hits = 0
     stall_polls = 0
+    last_done = None
+    last_progress_at = time.time()
+    restarts = 0
     _, docs0 = progress_snapshot(dataset_id)
     base_done = sum(1 for d in docs0 if d.get("run") == "DONE")
     base_pages = sum(page_map.get(d["name"], 0) for d in docs0 if d.get("run") == "DONE")
@@ -163,6 +193,28 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
         print(f"[{elapsed/60:5.1f}min] 完成 {counts.get('DONE',0)} 篇/{done_pages} 页"
               f" · 运行中 {counts.get('RUNNING',0)} · 未触发 {counts.get('UNSTART',0)}"
               f" · 失败 {counts.get('FAIL',0)}{eta}", flush=True)
+
+        # ---- 停摆检测：长时间零完成但仍有 RUNNING（task_executor 静默停摆的特征）----
+        if last_done is None or counts.get("DONE", 0) > last_done:
+            last_done = counts.get("DONE", 0)
+            last_progress_at = time.time()
+        stalled_min = (time.time() - last_progress_at) / 60
+        if stalled_min >= stall_minutes and counts.get("RUNNING", 0) > 0:
+            running = [d["id"] for d in docs if d.get("run") == "RUNNING"]
+            print(f"  ⚠ 已连续 {stalled_min:.0f} 分钟零完成，但有 {len(running)} 篇卡在 RUNNING"
+                  f"（疑似 task_executor 停摆）", flush=True)
+            if restarts == 0 or not auto_restart:
+                print(f"  ↻ 先补触发这 {len(running)} 篇（其任务已失效）", flush=True)
+                trigger_parse(dataset_id, running[:30], batch=5)
+            else:
+                print("  ⇄ 补触发无效，重启容器（--auto-restart）", flush=True)
+                if _restart_ragflow_container():
+                    print("  ✓ 容器已重启，重新触发卡住的文档", flush=True)
+                else:
+                    print("  ✗ 重启失败，转为补触发", flush=True)
+                trigger_parse(dataset_id, running[:30], batch=5)
+            restarts += 1
+            last_progress_at = time.time()  # 给一轮观察窗口
 
         idle = counts.get("RUNNING", 0) == 0 and (wave_mode or counts.get("UNSTART", 0) == 0)
         if idle:
@@ -206,6 +258,14 @@ def main() -> int:
                     help="本次最多触发解析 N 篇（0=不限）。用于分波提交，避免一次性打爆嵌入服务")
     ap.add_argument("--retry-fail", action="store_true",
                     help="只重试 FAIL 文档，不动 UNSTART（用于失败补救，避免重复提交已排队的文档）")
+    ap.add_argument("--include-running", action="store_true",
+                    help="把停在 RUNNING 的文档也重新触发（执行器停摆或容器重启后需要）")
+    ap.add_argument("--auto-restart", action="store_true",
+                    help="检测到执行器停摆且补触发无效时，自动重启 RAGFlow 容器（无人值守推荐）")
+    ap.add_argument("--stall-minutes", type=int, default=15,
+                    help="连续多少分钟零完成即判定停摆（默认 15）")
+    ap.add_argument("--ragflow-container", default=os.environ.get("RAGFLOW_CONTAINER", "docker-ragflow-cpu-1"),
+                    help="RAGFlow 容器名（--auto-restart 用）")
     ap.add_argument("--upload-only", action="store_true", help="只上传，不触发解析")
     ap.add_argument("--wait", action="store_true", help="上传并触发解析后等待完成")
     ap.add_argument("--status-only", action="store_true", help="只打印进度，不上传不触发")
@@ -214,6 +274,8 @@ def main() -> int:
     args = ap.parse_args()
 
     man = json.loads(args.manifest.read_text(encoding="utf-8"))
+    if args.ragflow_container:
+        os.environ["RAGFLOW_CONTAINER"] = args.ragflow_container
     if args.group == "trial":
         groups = [("paper", man.get("trial_papers") or []),
                   ("book", man.get("trial_books") or [])]
@@ -248,6 +310,9 @@ def main() -> int:
         if args.retry_fail:
             todo = [d["id"] for d in docs if d.get("run") == "FAIL"]
             print(f"  仅重试失败文档：{len(todo)} 篇", flush=True)
+        elif args.include_running:
+            todo = [d["id"] for d in docs if (d.get("run") or "UNSTART") != "DONE"]
+            print(f"  重新触发全部未完成文档（含 RUNNING）：{len(todo)} 篇", flush=True)
         else:
             todo = [d["id"] for d in docs if d.get("run") in (None, "UNSTART", "FAIL")]
         if args.wave:
@@ -262,7 +327,8 @@ def main() -> int:
             trigger_parse(ds["id"], todo)
         if args.wait:
             wait_done(ds["id"], man.get("page_map") or {}, args.interval, args.timeout,
-                      wave_mode=bool(args.wave))
+                      wave_mode=bool(args.wave), auto_restart=args.auto_restart,
+                      stall_minutes=args.stall_minutes)
         else:
             counts, _ = progress_snapshot(ds["id"])
             print(f"  已提交，当前状态 {counts}（用 --status-only 查看进度）", flush=True)

@@ -111,6 +111,9 @@ python scripts/ragflow_ingest.py --group all --status-only
 |---|---|
 | `--wave N` | 本次最多触发 N 篇解析，其余留待下次。**首次入库或大部头务必分波**，一次性提交几百篇会把 TEI 打爆（排队 >30s 触发读超时失败） |
 | `--retry-fail` | 只重试 `FAIL` 文档，不动 `UNSTART`——避免把已排队的文档重复提交 |
+| `--include-running` | 把停在 `RUNNING` 的文档也重新触发（**执行器停摆或容器重启后必用**，否则这些文档永远卡着） |
+| `--auto-restart` | 检测到执行器停摆且补触发无效时，自动重启 RAGFlow 容器（无人值守推荐） |
+| `--stall-minutes N` | 连续 N 分钟零完成即判定停摆（默认 15） |
 | `--upload-only` | 只上传不解析（先把文件送进库，等闲时再触发） |
 | `--status-only` | 只看进度 |
 | `--interval` / `--timeout` | 轮询间隔 / 等待上限 |
@@ -173,9 +176,34 @@ python scripts/ragflow_ops.py retrieve "昙石山遗址的贝壳堆积与年代"
 | 解析报 `No default embedding model is set.` | 租户默认嵌入未设 | `python scripts/ragflow_ops.py set-defaults --embd "BAAI/bge-m3"` |
 | 检索报 `Provider  not found for model .` | dataset 的 `embd_id` 为空 | `python scripts/ragflow_ops.py set-dataset --embd "BAAI/bge-m3@Builtin" --name <库名>` |
 | 解析报 `file type not supported yet(pdf supported)` | `paper` 切片只支持 PDF | DOCX/TXT 改写/转 PDF（或另建 `naive` 库） |
-| 某篇解析 `FAIL`，`progress_msg` 报 OCR/版式错误 | 扫描件质量差或文件损坏 | 单篇重试；仍失败则该篇排除并记录 |
+| 某篇解析 `FAIL`，`progress_msg` 报 `tei ... Read timed out` | 并发过高把嵌入服务打爆 | 重跑（`--retry-fail`）即可；下次用 `--wave` 降并发 |
+| 触发解析接口报 `Internal server error` | 文档多/负载高时接口偶发 500 | 脚本已自动小批量 + 退避重试；仍失败会在空闲时补触发 |
+| **★ 进度长时间不涨，多篇卡在 `RUNNING` 且进度 0%** | **task_executor 静默停摆** | 见下方专节 |
 | 检索结果全是同一篇 | 语料集中在少数文献 | 正常；按 §5.1 建回归集再调 chunk/阈值 |
 | 检索命中率低 | 术语不一致（"昙石山" vs "曇石山"） | 建术语/同义词表（RAGFlow 术语重写），或让查询规划器多出几组词 |
+
+### ★ 高危故障：task_executor 静默停摆（2026-09-23 实测，白等 5.7 小时）
+
+**症状**（四条同时出现才可判定）：
+
+1. 文档状态大面积 `RUNNING`，但 `progress` 恒为 0%、`chunk_count=0`、`process_duration=0`
+2. `docker stats` 里 ragflow 容器 CPU **接近 0**（宿主也几乎空闲）
+3. `/ragflow-logs/task_executor_*.log` 的 **最后修改时间停住**（不再写新行）
+4. 容器内 `task_executor.py` **进程还在**（`State: S`、`wchan: do_epoll_wait`）——看不出异常
+
+**诱因**：解析过程中累计多次 `tei ... Read timed out`（实测 45 次）之后，执行器的任务消费
+循环静默停掉，**不会自愈、不会重试、日志无报错**。
+
+**处置**：
+
+```powershell
+docker restart docker-ragflow-cpu-1                      # 复活执行器
+python scripts\ragflow_ingest.py --group papers --include-running --wait --interval 60   # 重触发卡住的文档
+```
+
+**预防**：无人值守时务必加 `--auto-restart --stall-minutes 15`——脚本检测到
+「连续 15 分钟零完成且仍有 RUNNING」会先补触发，无效则自动重启容器。
+同时**降低瞬时并发**（用 `--wave` 分波），从源头减少 TEI 超时。
 
 ## 7. 暂停与恢复（用完机器先让路）
 
