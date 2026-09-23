@@ -1,0 +1,12 @@
+{
+  "title": "给教授的确认清单",
+  "subtitle": "考古学论文插图生成流水线 · v1.1.0",
+  "eyebrow": "Professor Checklist · 交付确认",
+  "footer": "arch-illustration-pipeline v1.1.0 · 给教授的确认清单",
+  "theme": "report",
+  "stats": [
+    {"value": 6, "label": "待您确认事项"},
+    {"value": 20, "label": "组回归需求"},
+    {"value": 3, "label": "篇待补文献"}
+  ]
+}

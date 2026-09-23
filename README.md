@@ -133,6 +133,9 @@ python main.py --max-attempts 5       # 需要更多轮次
 
 ## 指定重绘：教授看了图提意见之后（v1.1.0 新增）
 
+> 需要交给教授的清单（要提供什么资料、要拍板什么、怎么给意见）见
+> [`docs/PROFESSOR_CHECKLIST.md`](docs/PROFESSOR_CHECKLIST.md)。
+
 自动重绘只解决"模型自己判不通过"。**教授人眼看着某处不对**时，用 `--revise` 把意见带进去：
 
 ```powershell
