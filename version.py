@@ -6,14 +6,15 @@
 """
 from __future__ import annotations
 
-__version__ = "1.0.0"
-__release_date__ = "2026-09-22"
-__release_name__ = "RAGFlow 知识层接入"
+__version__ = "1.1.0"
+__release_date__ = "2026-09-23"
+__release_name__ = "指定重绘 + 图内文字约束"
 
 # 本次发布配套的外部依赖版本（人工核对，供部署时对照）
 COMPAT = {
     "ragflow": "v0.27.2",
     "embedding_model": "BAAI/bge-m3 (TEI, Builtin provider)",
     "python": ">=3.10（开发环境 3.13）",
-    "openai_sdk": ">=1.40.0",
+    "openai_sdk": ">=2.0.0,<4.0.0（实测 3.17 + httpx2 与 2.x + httpx 0.28 均可用）",
+    "text_mode": "caption_only（默认）/ in_image",
 }

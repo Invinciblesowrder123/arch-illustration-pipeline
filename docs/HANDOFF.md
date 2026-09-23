@@ -1,6 +1,6 @@
 # 交接文档（HANDOFF）
 
-> **当前版本：v1.0.0（2026-09-22，RAGFlow 知识层接入）** —— 版本细节见根目录 `CHANGELOG.md`；
+> **当前版本：v1.1.0（2026-09-23，指定重绘 + 图内文字约束）** —— 版本细节见根目录 `CHANGELOG.md`；
 > 版本号唯一来源 `version.py`（`python main.py --version`）。
 > 给下一手开发 agent / 开发者。先读完本文，再按「阅读顺序」看仓库内文档。
 > 本文档不含任何密钥。密钥与机器环境事实由交接人单独提供（见 §5）。
@@ -16,7 +16,19 @@
 - 线上模型（aixw 中转，OpenAI 兼容）：语言 `gpt-5.6-sol`（支持读图）、绘图 `gpt-image-2`、
   **两模型分属不同分组，需要两个不同的 API Key**
 
-## 2. 当前状态（2026-09-22）
+## 2. 当前状态（2026-09-23，v1.1.0）
+
+- ✅ **v1.1.0 已完成（任务书 T1–T6）**：
+  - **指定重绘** `revise.py` + `main.py --revise --feedback …`：人工反馈 → 反馈结构化 →
+    图生图重绘（不支持则降级并记入报告）→ must_change/must_keep **逐条校验** →
+    `output/<run>_revN/` + 报告 + `revision.json`（链式 keep 累积继承）
+  - **图内文字策略** `TEXT_MODE`（默认 `caption_only`：图内无文字 + 图注表；`in_image` 保留）
+  - 客户端统一工厂 `config.make_openai_client()`、环境指纹 `--check`、依赖 pin + lock、
+    `NO_PROXY` 的 `[::1]` 清洗、检索零命中三因确诊与「检索明细」报告
+- ✅ 单测 **86 项全绿**（mock、零费用）；`--check --skip-image` 文本/读图通过
+  （RAGFlow 项报 502 属预期——本机栈按计划已 `docker compose stop`）
+- ⏳ **未做**：真实重绘端到端与图内文字两模式的真机各一例（按张计费，待确认）；
+  任务书 T7/T8/T9（入库收尾、检索回归集、页码抽检工具）
 
 - ✅ 六阶段流水线全部真机验收通过（含扫描版 PDF 视觉直读端到端）
 - ✅ 双 Key 首启向导、连通性自检（`--check`：文本/读图/绘图三项 + 配置了 RAGFlow 时
@@ -108,3 +120,9 @@
    - 列表接口 `page_size` 有上限（传 500 被拒）
    - Web 接口与 SDK 接口在 v0.27 统一为 **`/api/v1`** 前缀（`/v1/...` 会 404）
    - 生成 API Key 需 RSA 加密密码 → 直接调容器内 `api.utils.crypt.crypt()`（本机免装依赖）
+9. **v1.1.0（T1–T6）新增的坑**（完整表见 `DEV_TASKS.md` §7.1）：
+   - Windows 上 `NO_PROXY` 与 `no_proxy` 是**同一个**环境变量（大小写不敏感），测试里当两个写会互相覆盖
+   - `importlib.reload(config)` 会**重建类对象**，测试里 `assertRaises(前面 import 的 ConfigError)` 会失效 → 用 `config_mod.ConfigError` 动态取
+   - `knowledge/knowledge_summary.md` 是**全局**文件、每次运行覆盖；修订旧 run 必须读 run 目录快照（已改为每次运行在 run 内留一份）
+   - 上游多半不支持 `images.edit` → 图生图会降级为纯提示词重绘，**降级事实必须写进报告**（`generate.ImageResult.note`），否则等于静默降级
+   - 反馈结构化/逐条判定都可能返回不全：一律"缺判定 = 不通过"，不许静默放行（"只写不查等于没写"）

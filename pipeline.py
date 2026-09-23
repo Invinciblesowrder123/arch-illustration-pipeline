@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""流水线编排：需求输入 → 文献摄取 → 知识学习(可搜索) → 绘图 → 校验 → 闭环重绘 → 产出。"""
+"""流水线编排：需求输入 → 文献摄取/检索 → 知识学习 → 绘图 → 校验 → 闭环重绘 → 产出。
+
+「人工反馈驱动的指定重绘」不在这里，见 `revise.py`（T1）——它复用本模块的知识
+上下文与绘图/校验通道，但走独立的编排与报告。
+"""
 from __future__ import annotations
 
 import json
@@ -14,7 +18,7 @@ import verify
 from config import Config
 from errors import AppError, KnowledgeError, RagflowError, SearchError
 from ingest import collect_references
-from ragflow_client import RAGFlowClient, merge_chunks
+from ragflow_client import RAGFlowClient, diagnose_retrieval_cause, merge_chunks
 
 logger = logging.getLogger("painter")
 
@@ -27,12 +31,22 @@ def _refs_block(refs: list[dict]) -> str:
     return "、".join(parts)
 
 
-def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list[str]]:
-    """rag 模式阶段②：查询规划 → 逐组检索 → 合并去重。返回 (chunks, queries)。"""
+def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list[str], list[dict]]:
+    """rag 模式阶段②：查询规划 → 逐组检索 → 合并去重。
+
+    返回 (chunks, queries, per_query_diag)。T6 要求每次检索都可观测：
+    逐个查询打印命中数与最高相似度；零命中时必须区分"不通/库不存在/库空或阈值过高"
+    三种情况并**明确报错**——静默返回空会让流水线误以为"文献里没写"。
+    """
     client = RAGFlowClient(cfg.ragflow_base_url, cfg.ragflow_api_key, timeout=cfg.ragflow_timeout)
-    queries = knowledge.plan_queries(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement)
+    queries = knowledge.plan_queries(
+        cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement,
+        timeout=cfg.llm_timeout, max_retries=cfg.llm_retries)
     logger.info(f"[阶段②·rag] 检索规划 {len(queries)} 组查询: {queries}")
+
     results_per_query: list[list[dict]] = []
+    diag: list[dict] = []
+    errors: list[RagflowError] = []
     for q in queries:
         try:
             hits = client.retrieve(
@@ -41,19 +55,29 @@ def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list
                 similarity_threshold=cfg.retrieval_sim_threshold,
                 page_size=cfg.retrieval_page_size,
             )
+            top = max((h["similarity"] for h in hits), default=None)
+            logger.info(f"[阶段②·rag] 「{q}」命中 {len(hits)} 片段"
+                        + (f"，最高相似度 {top:.2f}" if top is not None else ""))
+            diag.append({"query": q, "hits": len(hits), "top_similarity": top, "error": ""})
         except RagflowError as e:
-            logger.warning(f"[阶段②·rag] 查询「{q}」检索失败（跳过）: {e.message}")
+            errors.append(e)
+            logger.warning(f"[阶段②·rag] 「{q}」检索失败: {e.message}")
+            diag.append({"query": q, "hits": 0, "top_similarity": None, "error": e.message})
             hits = []
-        logger.info(f"[阶段②·rag] 「{q}」命中 {len(hits)} 片段")
         results_per_query.append(hits)
+
     chunks = merge_chunks(results_per_query, top_k=cfg.retrieval_top_k)
     if not chunks:
+        cause = diagnose_retrieval_cause(client, cfg.ragflow_dataset_ids)
+        detail = f"首个检索错误: {errors[0].message}" if errors else ""
         raise RagflowError(
-            "RAG 模式检索未命中任何片段：请检查 dataset 是否已入库、"
-            "检索阈值是否过高（RETRIEVAL_SIM_THRESHOLD），或改用 --mode local。")
+            f"RAG 模式检索未命中任何片段。{cause}（也可改用 --mode local）", detail=detail)
+    if errors:
+        logger.warning(f"[阶段②·rag] {len(errors)}/{len(queries)} 组查询失败，"
+                       f"已按成功部分继续（失败原因见报告「检索明细」）")
     logger.info(f"[阶段②·rag] 合并去重后共 {len(chunks)} 片段"
                 f"（{len({c['document_name'] for c in chunks})} 篇文献）")
-    return chunks, queries
+    return chunks, queries, diag
 
 
 def _citations_block(chunks: list[dict]) -> tuple[str, list[dict]]:
@@ -70,10 +94,20 @@ def _citations_block(chunks: list[dict]) -> tuple[str, list[dict]]:
     return "\n".join(lines), [{"name": n, "pages": sorted(p for p in ps if p is not None)} for n, ps in ordered]
 
 
+def _retrieval_table_md(diag: list[dict]) -> str:
+    lines = ["| 检索词 | 命中片段 | 最高相似度 | 备注 |", "|---|---|---|---|"]
+    for d in diag:
+        top = f"{d['top_similarity']:.2f}" if d.get("top_similarity") is not None else "—"
+        lines.append(f"| {d['query']} | {d['hits']} | {top} | {d.get('error') or '—'} |")
+    return "\n".join(lines)
+
+
 def _write_report(
     out_dir: Path, requirement: str, refs: list[dict],
     attempts: list[dict], final_ok: bool, final_image: Path | None,
-    mode: str = "local", chunks: list[dict] | None = None, queries: list[str] | None = None,
+    *, mode: str = "local", chunks: list[dict] | None = None, queries: list[str] | None = None,
+    retrieval_diag: list[dict] | None = None, text_mode: str = "caption_only",
+    caption_table: str = "",
 ) -> Path:
     if mode == "rag":
         citations_md, _ = _citations_block(chunks or [])
@@ -84,33 +118,45 @@ def _write_report(
         if queries:
             source_line += f"\n- 检索词: {' / '.join(queries)}"
         citations_section = ["", "## 引用文献列表", citations_md, ""]
+        if retrieval_diag:
+            citations_section += ["## 检索明细", _retrieval_table_md(retrieval_diag), ""]
     else:
         source_line = f"- 参考文献({len(refs)}篇): {_refs_block(refs)}"
         citations_section = []
+    text_line = ("- 图内文字策略: caption_only（图内不出现任何文字，标注见图注表）"
+                 if text_mode == "caption_only"
+                 else "- 图内文字策略: in_image（图内标注必须为简体中文）")
     lines = [
         "# 考古插图生成报告",
         f"- 生成时间: {datetime.now():%Y-%m-%d %H:%M:%S}",
         f"- 知识层模式: {mode}",
         f"- 绘图需求: {requirement}",
         source_line,
+        text_line,
         f"- 最终结论: {'✅ 校验通过' if final_ok else '⚠️ 达到最大重试次数，仍有未解决问题（见下方明细）'}",
         f"- 最终插图: {final_image.name if final_image else '无'}",
         "",
         "## 绘图知识摘要",
         "见 knowledge/knowledge_summary.md",
         "",
+        "## 图注表（图版说明）",
+        caption_table or "（无）",
+        "",
         *citations_section,
         "## 各轮生成与校验明细",
     ]
     for a in attempts:
-        verdict = "✅ 通过" if a["verdict"]["pass"] else f"❌ 未通过（评分 {a['verdict'].get('score', 0)}）"
-        lines.append(f"### 第 {a['n']} 轮 — {verdict}")
+        verdict = a["verdict"]
+        verdict_txt = "✅ 通过" if verdict["pass"] else f"❌ 未通过（评分 {verdict.get('score', 0)}）"
+        lines.append(f"### 第 {a['n']} 轮 — {verdict_txt}")
         lines.append(f"- 图片: {a['image'].name}")
-        if a["verdict"]["problems"]:
+        if verdict.get("note"):
+            lines.append(f"- 说明: {verdict['note']}")
+        if verdict["problems"]:
             lines.append("- 问题清单:")
-            lines.extend(f"  {i+1}. {p}" for i, p in enumerate(a["verdict"]["problems"]))
-        if a["verdict"].get("suggestions"):
-            lines.append(f"- 修改建议: {a['verdict']['suggestions']}")
+            lines.extend(f"  {i+1}. {p}" for i, p in enumerate(verdict["problems"]))
+        if verdict.get("suggestions"):
+            lines.append(f"- 修改建议: {verdict['suggestions']}")
         lines.append("")
     report = out_dir / "report.md"
     report.write_text("\n".join(lines), encoding="utf-8")
@@ -126,10 +172,11 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
     refs: list[dict] = []
     chunks: list[dict] | None = None
     queries: list[str] | None = None
+    retrieval_diag: list[dict] | None = None
 
     if cfg.mode == "rag":
         # ---- 阶段②（rag 模式）：跳过目录摄取，改为查询规划 + RAGFlow 检索 ----
-        chunks, queries = _retrieve_knowledge(cfg, requirement)
+        chunks, queries, retrieval_diag = _retrieve_knowledge(cfg, requirement)
         refs = []  # rag 模式不直读 references/ 目录
     else:
         # ---- 阶段②：摄取参考文献 ----
@@ -143,8 +190,10 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
         logger.info(f"共 {len(refs)} 篇文献（其中视觉直读 {n_visual} 篇），文本合计 {total_chars} 字")
 
     # ---- 阶段③：知识学习 ----
-    logger.info("[阶段③] 调用大模型学习需求与文献…")
-    result = knowledge.learn(cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement, refs, chunks=chunks)
+    logger.info(f"[阶段③] 调用大模型学习需求与文献…（图内文字策略: {cfg.text_mode}）")
+    result = knowledge.learn(
+        cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement, refs, chunks=chunks,
+        text_mode=cfg.text_mode, timeout=cfg.knowledge_timeout, max_retries=cfg.llm_retries)
 
     # 阶段③ 的联网补充：仅 local 模式启用。rag 模式下知识来源应限于文献库，
     # 混入网络资料会破坏"断言可溯源到文献页码"的引用原则（见架构文档 §1.2）。
@@ -161,6 +210,7 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
             result = knowledge.learn(
                 cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model,
                 requirement, refs, search_results=payload,
+                text_mode=cfg.text_mode, timeout=cfg.knowledge_timeout, max_retries=cfg.llm_retries,
             )
             logger.info(f"[阶段③] 已并入 {len(results)} 条联网资料")
         except SearchError as e:
@@ -169,33 +219,49 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
         logger.warning("[阶段③] 模型建议联网补充知识，但搜索已禁用，继续用现有知识。")
 
     knowledge_md = result.get("knowledge_summary_md", "")
+    spec = result.get("illustration_spec", {}) or {}
+    caption_table = knowledge.caption_table_md(spec.get("annotations"))
     cfg.knowledge_dir.mkdir(parents=True, exist_ok=True)
     (cfg.knowledge_dir / "knowledge_summary.md").write_text(knowledge_md, encoding="utf-8")
     (cfg.knowledge_dir / "illustration_spec.json").write_text(
-        json.dumps(result.get("illustration_spec", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(f"[阶段③] 知识摘要与绘图规格已写入 {cfg.knowledge_dir}")
+        json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 同时在 run 目录留一份快照：全局 knowledge/ 会被后续每次运行覆盖，
+    # 而 --revise 修订历史 run 时必须拿到**那一次**的知识上下文（T1）。
+    (run_dir / "knowledge_summary.md").write_text(knowledge_md, encoding="utf-8")
+    (run_dir / "illustration_spec.json").write_text(
+        json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "caption_table.md").write_text(
+        f"# 图注表（{requirement[:40]}…）\n\n{caption_table}\n", encoding="utf-8")
+    logger.info(f"[阶段③] 知识摘要、绘图规格与图注表已写入 {cfg.knowledge_dir} / {run_dir.name}")
 
     # ---- 阶段④⑤：生成 + 校验闭环 ----
+    prompt_zh, prompt_en = knowledge.apply_text_mode(
+        result.get("image_prompt_zh", ""), result.get("image_prompt_en", ""), cfg.text_mode)
+
     attempts: list[dict] = []
     final_image: Path | None = None
     final_ok = False
     feedback = ""
 
     for n in range(1, cfg.max_attempts + 1):
-        prompt = result.get("image_prompt_zh", "")
-        prompt_en = result.get("image_prompt_en", "")
+        prompt = prompt_en or prompt_zh
         if feedback:
             prompt = f"{prompt}\n\n上一轮审稿发现的问题，本轮必须修正：\n{feedback}"
         img_path = run_dir / f"illustration_attempt_{n}.png"
         logger.info(f"[阶段④] 第 {n}/{cfg.max_attempts} 轮绘图（模型: {cfg.img_model}, 尺寸: {cfg.img_size}）")
-        generate.generate_image(cfg.img_api_key, cfg.img_base_url, cfg.img_model, cfg.img_size, prompt_en or prompt, img_path)
+        gen = generate.generate_image(cfg.img_api_key, cfg.img_base_url, cfg.img_model, cfg.img_size,
+                                      prompt, img_path,
+                                      timeout=cfg.image_timeout, max_retries=cfg.llm_retries)
         logger.info(f"[阶段④] 图片已生成: {img_path.name}")
 
         logger.info(f"[阶段⑤] 视觉模型校验中（模型: {cfg.vision_model}）…")
         verdict = verify.verify_image(
             cfg.vision_api_key, cfg.vision_base_url, cfg.vision_model,
-            str(img_path), requirement, knowledge_md + (f"\n\n上一轮问题（应已修正，请复核）:\n{feedback}" if n > 1 and feedback else ""),
+            str(img_path), requirement,
+            knowledge_md + (f"\n\n上一轮问题（应已修正，请复核）:\n{feedback}" if n > 1 and feedback else ""),
+            text_mode=cfg.text_mode, timeout=cfg.vision_timeout, max_retries=cfg.llm_retries,
         )
+        verdict.setdefault("note", getattr(gen, "note", "") or "")
         attempts.append({"n": n, "image": img_path, "verdict": verdict})
         logger.info(f"[阶段⑤] 校验结论: {'通过' if verdict['pass'] else '未通过'} (评分 {verdict.get('score', 0)})")
         if not verdict["pass"]:
@@ -219,7 +285,9 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
         logger.error("[阶段⑥] 达到最大重试次数仍未通过校验，详见报告中的问题清单。")
 
     report = _write_report(run_dir, requirement, refs, attempts, final_ok, final_image,
-                           mode=cfg.mode, chunks=chunks, queries=queries)
+                           mode=cfg.mode, chunks=chunks, queries=queries,
+                           retrieval_diag=retrieval_diag, text_mode=cfg.text_mode,
+                           caption_table=caption_table)
     logger.info(f"[阶段⑥] 报告: {report}")
 
     return {
@@ -229,4 +297,5 @@ def run(cfg: Config, requirement: str, scan_policy: str = "auto") -> dict:
         "report": report,
         "attempts": attempts,
         "knowledge_summary": cfg.knowledge_dir / "knowledge_summary.md",
+        "caption_table": run_dir / "caption_table.md",
     }

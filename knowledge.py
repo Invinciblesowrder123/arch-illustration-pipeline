@@ -19,11 +19,16 @@ from __future__ import annotations
 import json
 import logging
 
-from openai import OpenAI
-
+import config as config_mod
 from errors import KnowledgeError
 
 logger = logging.getLogger("painter")
+
+
+def _client(api_key: str, base_url: str, *, timeout: int | None = None,
+            max_retries: int | None = None):
+    """统一走 config.make_openai_client（T5：超时/重试来自配置，不再各写各的）。"""
+    return config_mod.make_openai_client(api_key, base_url, timeout=timeout, max_retries=max_retries)
 
 SYSTEM_PROMPT = """你是考古学学术论文插图的资深顾问，精通考古类型学、地层学、器物图谱与学术出版规范。
 你的任务是根据教授的绘图需求和参考文献，提炼准确的绘图知识，并给出可直接用于 AI 绘图模型的提示词。
@@ -43,7 +48,13 @@ USER_PROMPT_TEMPLATE = """## 教授的绘图需求
 请完成：
 1. 汇总文献中与绘图直接相关的专业知识（knowledge_summary_md，Markdown 格式，包含：器物/场景的形制特征、时代背景、构图要素、学术标注要求）。
 2. 判断仅凭上述知识能否画出学术上站得住脚的插图。若有明显知识缺口（如某器物形制描述缺失、某场景无史料支撑），设 needs_search=true 并给出 3 条以内精准的搜索查询词；若知识已足够，设 needs_search=false。
-3. 产出结构化绘图规格 illustration_spec 与中/英文绘图提示词。提示词要求：主体明确、要素逐一列举、注明学术插图风格（如白描线图/科学复原图/剖面图）、比例参照、必要时包含文字标注内容。"""
+3. 产出结构化绘图规格 illustration_spec 与中/英文绘图提示词，annotations 一项输出为对象数组
+   [{{"index": 1, "name": "吻部", "desc": "图面右上引线所指"}}]（供图注表使用，
+   name 用文献中的正式名称，desc 描述该要素在图面上的位置）。提示词要求：主体明确、
+   要素逐一列举、注明学术插图风格（如白描线图/科学复原图/剖面图）、比例参照、
+   必要时包含文字标注内容。
+
+{text_mode_block}"""
 
 REFINE_SEARCH_PROMPT_TEMPLATE = """## 教授的绘图需求
 {requirement}
@@ -58,7 +69,9 @@ REFINE_SEARCH_PROMPT_TEMPLATE = """## 教授的绘图需求
 - 更新 knowledge_summary_md（把补充资料中可靠的知识并入，标注来源 URL）
 - needs_search 必须为 false
 - 产出最终版 illustration_spec、image_prompt_zh、image_prompt_en
-严格输出 JSON。"""
+严格输出 JSON。
+
+{text_mode_block}"""
 
 
 # ---------- RAG 模式（P2）：查询规划与片段注入 ----------
@@ -92,7 +105,65 @@ CHUNKS_USER_PROMPT_TEMPLATE = """## 教授的绘图需求
 2. 判断仅凭上述片段能否画出学术上站得住脚的插图。若有明显知识缺口，设
    needs_search=true 并给出 3 条以内精准的搜索查询词；若知识已足够，设 needs_search=false。
 3. 产出结构化绘图规格 illustration_spec 与中/英文绘图提示词（主体明确、要素逐一列举、
-   注明学术插图风格、比例参照、必要的文字标注）。"""
+   注明学术插图风格、比例参照、必要的文字标注）。annotations 一项输出为对象数组
+   [{{"index": 1, "name": "吻部", "desc": "图面右上引线所指"}}]（供图注表使用，
+   name 用文献中的正式名称，desc 描述该要素在图面上的位置）。
+
+{text_mode_block}"""
+
+
+# ---- 图内文字策略（T2）----
+# 两条路都要能跑通：caption_only=图内不出现任何文字（标注改走图注表）；
+# in_image=图内标注强制简体中文。后者不可靠（文生图模型渲染中文常出伪汉字），
+# 故默认前者——这也正是考古线图的学术惯例：图内标编号、图版说明给名称。
+
+TEXT_MODE_BLOCKS = {
+    "caption_only": """## 图内文字策略：caption_only（图内无字 + 图注表）
+本次插图**图内不得出现任何文字、字母或数字**，所有标注改为**图下图注表**。
+因此：
+- illustration_spec.annotations 必须齐全（编号 ↔ 名称一一对应），
+  desc 要能让人对照图面的引线位置认出是哪个部位；
+- 绘图提示词里明确写"图内不出现任何文字，仅用引线指示标注位置"；
+- 不要在提示词里要求写出任何汉字的标注文字。""",
+    "in_image": """## 图内文字策略：in_image（图内标注，简体中文）
+本次插图的标注**写在图内**，且**必须是简体中文**。
+因此：
+- illustration_spec.annotations 给出需要写在图内的标注文字（简体中文）；
+- 绘图提示词里明确写"所有图内标注文字为简体中文、字体端正清晰可读"；
+- 不要出现英文标注或装饰性伪汉字。""",
+}
+
+# 追加到"绘图提示词"末尾的硬约束，中英双语（多数绘图模型英文提示词更稳，
+# 但中文约束又不能省，故两条都写）
+TEXT_MODE_DRAW_CLAUSES = {
+    "caption_only": (
+        "\n\n【图内文字硬约束】图内不得出现任何文字、字母、数字，也不得出现仿汉字的装饰符号；"
+        "需要标注的位置只用细引线指出，名称一律放在图外图注表中。"
+        "\n[HARD CONSTRAINT] Render NO text, letters, digits or pseudo-glyphs inside the image. "
+        "Mark annotation points with plain leader lines only; all names belong to the external caption table."
+    ),
+    "in_image": (
+        "\n\n【图内文字硬约束】图内所有标注文字必须是简体中文，字体端正、清晰可读；"
+        "不得出现英文、乱码或无法辨认的伪汉字。"
+        "\n[HARD CONSTRAINT] Every in-image label must be legible Simplified Chinese; "
+        "no English, no garbled or unreadable pseudo-characters."
+    ),
+}
+
+
+def text_mode_block(text_mode: str) -> str:
+    """知识学习阶段的文字策略说明（决定 annotations 怎么产出）。"""
+    return TEXT_MODE_BLOCKS.get(text_mode, TEXT_MODE_BLOCKS["caption_only"])
+
+
+def apply_text_mode(prompt_zh: str, prompt_en: str, text_mode: str) -> tuple[str, str]:
+    """把图内文字硬约束追加到绘图提示词上（T2 的提示词层）。
+
+    注意：提示词层只是第一道；文生图模型对中文渲染不可靠，
+    第二道是 verify.py 的文字语言判定项，两道都要有。
+    """
+    clause = TEXT_MODE_DRAW_CLAUSES.get(text_mode, TEXT_MODE_DRAW_CLAUSES["caption_only"])
+    return (prompt_zh or "") + clause, (prompt_en or "") + clause
 
 
 def format_chunks(chunks: list[dict]) -> str:
@@ -105,9 +176,42 @@ def format_chunks(chunks: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def plan_queries(api_key: str, base_url: str, model: str, requirement: str) -> list[str]:
+def _cell(text) -> str:
+    return str(text).replace("|", "／").replace("\n", " ").strip() or "—"
+
+
+def caption_table_md(annotations) -> str:
+    """把 illustration_spec.annotations 渲染成图注表（编号 ↔ 名称一一对应，T2）。
+
+    兼容三种模型输出：对象数组 / 字符串数组 / {编号: 名称} 映射——
+    模型的 annotations 字段格式不稳定，这里只做归一化，不猜内容。
+    """
+    if isinstance(annotations, dict):
+        items = [{"index": k, "name": v} for k, v in annotations.items()]
+    elif isinstance(annotations, list):
+        items = annotations
+    else:
+        items = []
+    rows = []
+    for i, a in enumerate(items, 1):
+        if isinstance(a, dict):
+            idx = a.get("index", a.get("no", i))
+            name = a.get("name") or a.get("label") or a.get("text") or a.get("title") or "（未命名）"
+            desc = a.get("desc") or a.get("description") or a.get("position") or ""
+        else:
+            idx, name, desc = i, str(a), ""
+        rows.append((_cell(idx), _cell(name), _cell(desc)))
+    if not rows:
+        return "（模型未给出标注要素，图注表为空——请人工补注后再送审）"
+    lines = ["| 编号 | 名称 | 图上位置 |", "|---|---|---|"]
+    lines += [f"| {i} | {n} | {d} |" for i, n, d in rows]
+    return "\n".join(lines)
+
+
+def plan_queries(api_key: str, base_url: str, model: str, requirement: str, *,
+                 timeout: int | None = None, max_retries: int | None = None) -> list[str]:
     """查询规划器：需求 → 3-5 组检索词。解析失败时降级为 [需求原文]。"""
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = _client(api_key, base_url, timeout=timeout, max_retries=max_retries)
     try:
         raw = _chat(client, model, SYSTEM_PROMPT,
                     QUERY_PLANNER_PROMPT.format(requirement=requirement), temperature=0.2)
@@ -156,7 +260,7 @@ def _build_refs_content(refs: list[dict]) -> list[dict]:
     return parts
 
 
-def _chat(client: OpenAI, model: str, system: str, user, temperature: float = 0.3) -> str:
+def _chat(client, model: str, system: str, user, temperature: float = 0.3) -> str:
     """user 可为 str（纯文本）或 list[dict]（多模态 content 数组）。"""
     resp = client.chat.completions.create(
         model=model,
@@ -183,7 +287,7 @@ FIX_PROMPTS_PROMPT = """基于以下绘图知识与需求，生成可直接用�
 严格输出 JSON：{{"image_prompt_zh": "中文提示词", "image_prompt_en": "English prompt"}}。"""
 
 
-def _ensure_prompts(client: OpenAI, model: str, requirement: str, result: dict) -> dict:
+def _ensure_prompts(client, model: str, requirement: str, result: dict) -> dict:
     """校验绘图提示词字段；缺失或为空时调用模型自动补齐（比整轮重试便宜）。"""
     if result.get("image_prompt_zh") and result.get("image_prompt_en"):
         return result
@@ -204,18 +308,25 @@ def learn(
     requirement: str, refs: list[dict],
     search_results: list[dict] | None = None,
     chunks: list[dict] | None = None,
+    *,
+    text_mode: str = "caption_only",
+    timeout: int | None = None,
+    max_retries: int | None = None,
 ) -> dict:
     """知识学习主入口。
 
     - chunks 非空（rag 模式）：以检索片段为知识来源，断言带 [文献 p.X] 出处；
-    - search_results 为 None 时为首轮（可能要求搜索），有则为定稿轮。
+    - search_results 为 None 时为首轮（可能要求搜索），有则为定稿轮；
+    - text_mode 决定 annotations 的产出方式（图内无字 / 图内中文）。
     """
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = _client(api_key, base_url, timeout=timeout, max_retries=max_retries)
+    mode_block = text_mode_block(text_mode)
 
     # ---- RAG 模式：检索片段通道 ----
     if chunks:
         user = CHUNKS_USER_PROMPT_TEMPLATE.format(
-            requirement=requirement, n_chunks=len(chunks), chunks_text=format_chunks(chunks))
+            requirement=requirement, n_chunks=len(chunks),
+            chunks_text=format_chunks(chunks), text_mode_block=mode_block)
         first = _parse_json(_chat(client, model, SYSTEM_PROMPT, user))
         first.setdefault("needs_search", False)
         first.setdefault("search_queries", [])
@@ -227,7 +338,7 @@ def learn(
         user = USER_PROMPT_TEMPLATE.format(
             requirement=requirement, n_refs=len(refs),
             refs_text="（见下方文献内容）" if has_images else "",
-            search_block="",
+            search_block="", text_mode_block=mode_block,
         )
         if has_images:
             # 扫描版文献以逐页图片形式附在 content 数组里，交给多模态模型直读
@@ -248,6 +359,7 @@ def learn(
         requirement=requirement,
         first_summary=first_summary or "（无）",
         search_text=format_search_results(search_results["results"]),
+        text_mode_block=mode_block,
     )
     final = _parse_json(_chat(client, model, SYSTEM_PROMPT, user))
     final["needs_search"] = False

@@ -34,3 +34,7 @@ class SearchError(AppError):
 
 class RagflowError(AppError):
     """RAGFlow 知识层调用失败（检索/上传/配置）。"""
+
+
+class ReviseError(AppError):
+    """指定重绘（--revise）失败：基准 run 产物缺失、反馈约束冲突等。"""

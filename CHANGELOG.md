@@ -5,6 +5,110 @@
 
 ---
 
+## [1.1.0] — 2026-09-23 · 指定重绘 + 图内文字约束
+
+教授拿到图之后能"提意见"了。此前只有"模型自己判不通过 → 自动重绘"一条路，
+人工看图后想改某处**没有任何入口**——只能改 `requirement.txt` 从零重跑，
+知识摘要与已通过的方面全部丢失。本版补上这条路，并同时解决"图里写的是英文"的问题。
+
+### 亮点
+
+- **指定重绘（T1，本次核心）**：给一次 run 加一段自然语言反馈，产出新一版插图。
+  反馈先被拆成 `must_change[]` / `must_keep[]`，逐条落实、逐条校验，
+  未指定的方面不得漂移；链式修订（`_rev1` → `_rev2`）时 `must_keep` **累积继承**。
+- **图内文字策略（T2）**：新增 `TEXT_MODE`，默认 `caption_only`——图内不出现任何文字，
+  标注改走**图下图注表**（编号↔名称一一对应）。这既是考古线图的学术惯例，
+  也绕开了"文生图模型渲染中文常出伪汉字"的可靠性问题；`in_image` 模式保留，
+  提示词强制简体中文、校验新增文字语言与可读性判定。
+
+### 新增
+
+**指定重绘（`revise.py`）**
+- `main.py --revise <run目录> --feedback "<教授的修改意见>"`，配套
+  `--refine-from final|last|<文件名>`、`--must-change`、`--must-keep`、
+  `--text-mode`、`--max-attempts`、`--re-retrieve`。
+- 反馈结构化：**一次轻量 LLM 调用**拆出 must_change / must_keep / open；
+  模型返回不可解析时降级为"整段反馈并入 must_change"，并在报告里标注降级。
+- 修订提示词 = 原始需求 + 上一轮知识摘要（**引用标注保留，默认不重新检索**）
+  + 反馈约束 + 硬约束 + 一句明确要求："除 must_change 列出的项外，其余内容必须与上一版保持一致"。
+- 修订校验（`verify.verify_revision_image`）：**同时送上一版与本轮新版两张图**，
+  逐条给出 `满足/部分满足/未满足` 与 `未漂移/漂移` + **图面证据**；
+  模型漏判某条时补"未判定"并强制不通过（**只写不查等于没写**）。
+- 落盘 `output/<原run名>_rev<N>/`：新图 + `report.md`（含反馈原文、结构化结果、
+  逐条判定表、逐轮明细）+ `revision.json`（供链式继承）+ `caption_table.md`。
+
+**图内文字（T2）**
+- `TEXT_MODE` 配置项（`caption_only` 默认 / `in_image`），提示词层追加**中英双语**硬约束
+  （中文约束必要、英文提示词更稳，两条都写）。
+- 校验层新增 `text_check` 判定：caption_only 下出现任何文字/字母/数字/仿汉字即不通过；
+  in_image 下出现英文/乱码/不可辨伪汉字即不通过。**模型未返回该判定时按保守处理计为不通过**，
+  不允许静默放行。
+- 图注表：`knowledge.caption_table_md()` 把 `illustration_spec.annotations`
+  归一化渲染成「编号｜名称｜图上位置」表格，兼容对象数组 / 字符串数组 / 映射三种模型输出；
+  写入报告、`caption_table.md`，并把它写进 `illustration_spec` 的产出要求。
+
+**工程（T3 / T5 / T6）**
+- `config.make_openai_client()` 统一客户端工厂：`LLM_TIMEOUT` / `LLM_TIMEOUT_KNOWLEDGE` /
+  `VISION_TIMEOUT` / `IMG_TIMEOUT` / `LLM_RETRIES` 全部来自 `.env`，
+  知识 / 绘图 / 校验 / 自检四处调用点统一改走它；`--check` 打印**生效值**。
+- `--check` 打印**环境指纹**（项目版本、Python 与平台、openai/httpx/httpx2/requests/
+  PyMuPDF/python-docx/ddgs 版本），两台机器可直接逐行对比。
+- **依赖 pin**：`requirements.txt` 直接依赖加上限（`openai>=2.0.0,<4.0.0` 等），
+  新增 `requirements.lock.txt`（本机 `pip freeze` 全量）。
+- **检索可观测（T6）**：逐组查询打印命中数与最高相似度；零命中时自动确诊**三种**原因
+  （RAGFlow 不可达 / dataset 不存在 / 库空或阈值过高）并明确报错；
+  部分查询失败不再静默——失败原因写进报告新增的「检索明细」表。
+
+**知识快照**
+- 每次运行在 run 目录同时落一份 `knowledge_summary.md` / `illustration_spec.json` /
+  `caption_table.md`（`--revise` 修订历史 run 时必须拿到**那一次**的知识上下文）。
+
+### 变更
+
+- `knowledge.learn()` / `plan_queries()` 增加 `text_mode` / `timeout` / `max_retries` 参数；
+  公开签名向后兼容（新参数均有默认值）。
+- `generate.generate_image()` 返回 `ImageResult(path, used_reference, note)` 而非 `Path`
+  （流水线忽略返回值，故不影响既有调用）；新增 `input_image` 参数走图生图。
+- `verify.verify_image()` 新增可选 `text_mode` / `timeout` / `max_retries`；
+  不传 `text_mode` 时行为与 1.0.0 完全一致。
+- `knowledge/illustration_spec.json` 的 `annotations` 字段要求改为对象数组
+  （兼容旧格式，无需重跑历史 run）。
+
+### 修复
+
+- **`NO_PROXY` 含 `[::1]` 时 httpx 构造客户端即崩**（T4）：`config` 模块导入时
+  剔除带方括号的 IPv6 回环项（合法的 `::1` 保留），**不动** `HTTP_PROXY`/`HTTPS_PROXY`。
+  此前这类报错（`InvalidURL: Invalid port: ':1]'`）与网络无关，现场极难定位。
+- **`knowledge_summary.md` 是全局文件、会被后续每次运行覆盖**：修订旧 run 时会拿到
+  别人的知识上下文。改为 run 目录留快照，`--revise` 优先读快照并在报告中注明来源。
+- 检索失败此前只打 warning 就跳过，可能出现"静默返回空"被误读成"文献里没写"；
+  现在区分部分失败与全部失败，全部失败直接报错并附确诊结论。
+- `caption_only` 下模型漏给 `text_check` 时曾可能静默通过 —— 现在强制计为不通过。
+
+### 验收
+
+- 单测：**86 项全绿**（原有 34 项无退化 + 新增 52 项，全部 mock、不访问网络、不产生费用）
+- 自检：`python main.py --check --skip-image` → 文本 ✅ / 读图 ✅ / 绘图 ⏭ /
+  RAGFlow ❌（本机栈按计划已 `docker compose stop`，报 502 属预期）
+- ⏳ 真实重绘端到端（T1.5 验收第 1 条）**尚未执行**：按张计费，待确认后跑
+- ⏳ 人眼抽查 3 例漂移（T1.5 验收第 3 条）依赖上一条
+
+### 未纳入本版（见 `docs/DEV_TASKS.md` §4）
+
+- T7 知识库入库收尾（论文组补齐 + B 方案专著组）、T8 检索回归集（需教授提供 20 组历史需求）、
+  T9 引用页码抽检工具。
+
+### 已知问题
+
+- `caption_only` 下"图内零文字"与"图注表按编号对应"之间存在一个取舍：本实现要求图内
+  **连阿拉伯数字也不出现**（严格照任务书），图注表因此用「图上位置」描述来对应图面引线。
+  若教授更希望图内保留编号数字，需按任务书 T2 修订一行判定规则。
+- 生成插图仅供研究辅助：审稿校验是模型判断，**不可替代人工核对与学术责任**。
+
+[1.1.0]: https://github.com/Invinciblesowrder123/arch-illustration-pipeline/releases/tag/v1.1.0
+
+---
+
 ## [1.0.0] — 2026-09-22 · RAGFlow 知识层接入
 
 首个正式版本。此前的开发阶段（本地文献直读闭环）未打标签，本版把「知识来源」从

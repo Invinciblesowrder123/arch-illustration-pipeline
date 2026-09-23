@@ -1,44 +1,52 @@
 # 待开发清单（TODO）
 
-> **⚠️ 开发需求以 `docs/DEV_TASKS.md`（v1.1.0 开发任务书）为准**，本文件仅作历史记录与补充。
+> **⚠️ 开发需求以 `docs/DEV_TASKS.md`（v1.1.0 开发任务书）为准**，本文件仅作进度记录与补充。
 > 项目已转向 **RAGFlow 知识层新框架**：与旧框架（本地重型解析：MinerU / 结构感知选段 /
 > 递归扫描 references 等）相关的事项**一律不纳入开发清单**（详见任务书 §1.2）。
 
-> 约定：事项按优先级排列；完成即移入文末「已完成」并注明提交号。
-> 需要拍板的事项标 ⏸，被其他方案替代而关闭的标 ✕。
+> 约定：事项按优先级排列；完成即注明版本；需要拍板的事项标 ⏸，被其他方案替代而关闭的标 ✕。
 
-## 高优先级
+## 已完成（v1.1.0 · 2026-09-23）
 
-- [x] ✓ **RAGFlow 知识层接入（P2）—— 代码完成 + 真机验收通过（2026-09-22）**
-  `ragflow_client.py`（retrieval / 批量上传 / dataset 管理）、`knowledge.py` 查询规划器 +
-  chunks 注入通道（断言带 `[文献 p.X]`）、`pipeline.py` rag/local 双模式 + 报告引用列表、
-  `main.py --mode rag|local`。本机部署 RAGFlow v0.27.2 后真机打通：
-  `--check` 4 项全绿、`--dry-run --mode rag` 检索命中、`--mode rag` 端到端跑通；
-  mock 单测 31 项全绿。
-  **源码核验修正两处**：候选池参数 `top_k`→`knn_top_k`；页码在 `positions[0][0]` 且为 0 基
-  （必须 +1，否则引用整体少一页）。
+对应任务书 §4 的 T1–T6，代码 + mock 单测（86 项全绿）已完成，真机验收项另行标注：
 
-- [ ] ⏸ **RAGFlow 嵌入模型/机器选型决策（阻塞 215 篇入库）**
-  实测 bge-m3 版 TEI 独占 17.1GB 内存，整栈约 20.5GB → **16GB 服务器跑不动**。
-  三选一：① 服务器 ≥32GB；② 改用 `Qwen/Qwen3-Embedding-0.6B`（预期约 5GB）；
-  ③ 嵌入走外部 API。**必须在入库前定，换模型要重算全库向量**。
-  详见 `docs/RAGFLOW_ARCHITECTURE.md` §10.1。
+- [x] ✓ **T1 指定重绘（人工反馈驱动）** —— 新增 `revise.py` + `main.py --revise/--feedback/
+  --refine-from/--must-change/--must-keep/--text-mode/--re-retrieve`；反馈结构化（含降级）→
+  组装修订提示词 → 图生图重绘（不支持则降级并记入报告）→ **must_change/must_keep 逐条判定**
+  → `output/<run>_revN/` + 报告 + `revision.json`（链式 keep 累积继承）。
+- [x] ✓ **T2 图内文字策略** —— `TEXT_MODE`（默认 `caption_only`：图内无文字 + 图注表）；
+  `in_image` 保留（提示词强制简体中文）。校验新增 `text_check` 判定，缺判定按保守处理。
+- [x] ✓ **T3 依赖 pin + 环境指纹** —— `requirements.txt` 加上限、`requirements.lock.txt`；
+  `--check` 打印项目版本/Python/平台/关键库版本。
+- [x] ✓ **T4 代理健壮性** —— `config._sanitize_proxy_env()` 导入时清理 `NO_PROXY` 里的 `[::1]`，
+  不动 `HTTP_PROXY`/`HTTPS_PROXY`。
+- [x] ✓ **T5 客户端统一超时/重试** —— `config.make_openai_client()`；`LLM_TIMEOUT` /
+  `LLM_TIMEOUT_KNOWLEDGE` / `VISION_TIMEOUT` / `IMG_TIMEOUT` / `LLM_RETRIES`。
+- [x] ✓ **T6 检索可观测与降级** —— 逐组查询打印命中/最高相似度；零命中确诊三因；
+  报告新增「检索明细」；检索失败不再静默。
+- [x] ✓ **附带修复** —— run 目录落知识快照（修订旧 run 不再拿错上下文）、
+  报告新增「图注表」、`generate_image` 支持参考图与降级说明。
 
-- [ ] **教授侧 215 篇入库 + 入库调优（P1/P1.5）**
-  本机 `references/` 为空（仅 3 份样本验证链路），真实语料在教授侧。
-  入库前先定上一条的模型选型；入库后按 §5.1 做「试切-评估-调参-全量」。
-  运维脚本已备：`scripts/ragflow_ops.py`（上传/解析/状态/检索试跑）、
-  `scripts/ragflow_bootstrap.py`（建号/取 Key/建库）。
+## 待确认 / 待拍板（逐条列全）
 
-- [ ] ⏸ **本机 RAGFlow 常驻策略**
-  当前栈常驻约 20.5GB 内存（TEI 17GB）。需拍板：跑完测试后是否 `docker compose stop`
-  停栈、是否设为开机自启、以及 `restart: unless-stopped` 是否改掉。停栈命令见
-  `D:\AI\RAGFlow\README.md` §3。
+| # | 事项 | 说明 / 影响 |
+|---|---|---|
+| 1 | ⏸ **是否现在跑真机重绘验收（T1.5 第 1 条）** | 用 `output/run_20260922_183750` + 三段反馈真实跑一次，**按张计费**；跑完才能做"人工抽查 3 例漂移"。要用户点头 |
+| 2 | ⏸ **`caption_only` 是否允许图内阿拉伯数字序号** | 现按任务书严格执行"图内零文字（含数字）"，图注表用「图上位置」列对应图面引线。若希望图内留编号数字，改判定规则一行 |
+| 3 | ⏸ **`TEXT_MODE` 最终选型** | 建议两种各出一版真机图给教授挑（`caption_only` 更贴学术惯例，`in_image` 风险是中文渲染不可靠） |
+| 4 | ⏸ **RAGFlow 嵌入模型/机器选型**（阻塞 215 篇入库） | bge-m3 版 TEI 独占 17.1GB、整栈约 20.5GB → 16GB 服务器跑不动。① ≥32GB 机器 ② 换 `Qwen/Qwen3-Embedding-0.6B`（约 5GB）③ 外部嵌入 API。**必须在入库前定，换模型要重算全库向量** |
+| 5 | ⏸ **本机 RAGFlow 常驻策略** | 跑完测试后是否 `docker compose stop`、是否开机自启、`restart: unless-stopped` 是否改掉 |
+| 6 | ⏸ **T7 入库收尾是否开跑** | 论文组补齐（必须带 `--include-running`）+ B 方案专著组（14 本 / 5108 页，约 2.3 页/分钟）——占机器时间，需用户排期 |
+| 7 | ⏸ **T8 检索回归集** | 需教授提供 20 组历史绘图需求 + 期望命中文献/页码；建立后所有检索/切片改动必须先跑它 |
+| 8 | ⏸ **T9 引用页码抽检工具**是否要做 | 随机抽 N 条引用输出原文片段供人工核对页码 |
 
-- [ ] **入库调优环节（P1.5，配合 RAGFlow）** → 已并入 `DEV_TASKS.md` **T8 检索回归集**
-  全量入库前先做「试切-评估-调参」：挑 10 篇代表性文献试切，用 20 组典型需求
-  作为检索回归集测命中率，调优 chunk 方法/长度/分隔符与 embedding 模型后再全量导入。
-  设计详见 `docs/RAGFLOW_ARCHITECTURE.md` §7。
+## 遗留（非本机可闭环）
+
+- [ ] **教授侧 3 篇付费文献**：Ferrell 1969（纸本）、Grace 1961（Wiley）、Grace 1964（Chicago）——无合法免费源
+- [ ] **2 个坏文件重下**：`Pawley_Green_Chapter3.pdf`（13KB 截断）、
+  `Pawley_Prehistory_Oceanic_Languages.pdf`（42KB 截断）
+- [ ] **`Pawley_Green_Chapter3` 原始目标确认**：疑似即已入库的《The Austronesians》第 3 章
+  （Pawley & **Ross**），需教授确认
 
 ## 已被替代 / 暂缓
 

@@ -34,13 +34,15 @@
 
 ---
 
-## 2. 现状快照（2026-09-23 19:20）
+## 2. 现状快照（2026-09-23 19:40，T1–T6 完成后更新）
 
 ### 2.1 版本与仓库
 
-- 当前版本 **v1.0.0**（2026-09-22，主题「RAGFlow 知识层接入」），已打 tag + GitHub Release
+- 当前版本 **v1.1.0**（2026-09-23，主题「指定重绘 + 图内文字约束」）＝本任务书 T1–T6 的成果
+  （前一版 v1.0.0「RAGFlow 知识层接入」已打 tag + Release）
 - 版本号唯一来源：`version.py`（改版本时同步 `CHANGELOG.md`）
-- 单测：`python -m unittest discover -s tests -t .` → **34 项全绿**（不得退化）
+- 单测：`python -m unittest discover -s tests -t .` → **86 项全绿**（T1–T6 新增 52 项，原 34 项无退化）
+- 依赖：`requirements.txt` 已钉版本区间，另附 `requirements.lock.txt`（本机 `pip freeze`）
 
 ### 2.2 知识库规模（RAGFlow v0.27.2，本机部署）
 
@@ -84,6 +86,12 @@
 ## 4. 任务清单
 
 ### T1【P0】指定重绘（人工反馈驱动）★ 本次核心
+
+> **状态：✅ 代码完成（v1.1.0）。** 落在 `revise.py`；CLI 见 §T1.1；
+> mock 单测覆盖反馈结构化三态、基准 run 解析、链式 keep 继承、逐条判定与报告渲染。
+> ⏳ 验收第 1 条（真机跑一次重绘）与第 3 条（人工抽查 3 例漂移）**待用户确认后执行**——绘图按张计费。
+> 实现补充：修订校验**同时送上一版与本轮新版两张图**，漂移判定才有依据；上游无图生图接口时
+> 自动降级并写进报告。
 
 **问题**：现有重绘只有"模型自己判不通过 → 自动重绘"这一条路。教授人工看图后提出修改意见时，
 没有任何入口能把意见带进重绘——只能改 `requirement.txt` 从零重跑，知识摘要与已通过的方面都丢了。
@@ -155,6 +163,13 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ### T2【P0】图内文字语言约束 + 无字图模式
 
+> **状态：✅ 代码完成（v1.1.0）。** `TEXT_MODE`（默认 `caption_only`）、提示词中英双语硬约束、
+> 校验 `text_check` 判定（缺判定按保守处理计为不通过）、图注表（编号｜名称｜图上位置）写入
+> 报告与 `caption_table.md`。
+> ⏳ 验收（各跑一例真机）待确认后执行；两版都给教授挑。
+> **待教授/用户拍板**：`caption_only` 目前按任务书严格执行"图内连阿拉伯数字也不出现"，
+> 图注表用「图上位置」列对应图面引线。若更希望图内保留数字序号，需改 T2 判定规则一行。
+
 **问题**：教授反馈"生成的图片是英文的"。
 
 **根因（两层，都要覆盖）**：
@@ -179,6 +194,11 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ### T3【P1】依赖 pin + 自检打印版本（跨机器可复现）
 
+> **状态：✅ 完成（v1.1.0）。** `requirements.txt` 直接依赖加上限；`requirements.lock.txt` 已生成；
+> `--check` 开头打印环境指纹（项目版本 / Python / 平台 / openai / httpx / httpx2 / requests /
+> PyMuPDF / python-docx / ddgs）。
+> 实测本机为 **openai 3.17 + httpx2 2.13**（即任务书里"另一方"那种组合），指纹里 httpx 显示"未安装"属正常。
+
 **背景**：两台机器环境漂开（一方 `openai 2.x + httpx 0.28`，一方 `openai 3.17 + httpx2`），
 产生了一整类"你这能跑我这不能跑"。根因是 `requirements.txt` 只写了下限（`openai>=1.40.0`）。
 
@@ -193,6 +213,10 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ### T4【P1】代理健壮性（NO_PROXY 的 `[::1]`）
 
+> **状态：✅ 完成（v1.1.0）。** `config._sanitize_proxy_env()` 在模块导入时执行；单测覆盖清理与
+> "代理变量不得被清空"。
+> 注意：Windows 上 `NO_PROXY` 与 `no_proxy` 是**同一个**环境变量（大小写不敏感），写测试时别当成两个。
+
 **问题**：`NO_PROXY` 含 `[::1]` 时（Cherry Studio 等工具会注入），httpx 0.28 在**构造客户端**时就崩：
 `InvalidURL: Invalid port: ':1]'`——报错与网络无关，极难定位。
 
@@ -204,6 +228,10 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 ---
 
 ### T5【P1】LLM 客户端统一超时/重试
+
+> **状态：✅ 完成（v1.1.0）。** `config.make_openai_client()` 为唯一构造点；
+> `LLM_TIMEOUT` / `LLM_TIMEOUT_KNOWLEDGE` / `VISION_TIMEOUT` / `IMG_TIMEOUT` / `LLM_RETRIES` 全部可配，
+> `--check` 打印生效值。
 
 **问题**：客户端的超时/重试各写各的——`check.py` 用 `CHECK_TIMEOUT`、`generate.py` 写死 300s、
 **`knowledge.py` 连超时都没设**。实测上游存在风控判定导致单次调用拖到 70s+ 的情况。
@@ -217,6 +245,9 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ### T6【P1】检索链路的可观测与降级
 
+> **状态：✅ 完成（v1.1.0）。** 逐组查询打印 query/命中数/最高相似度；零命中自动确诊三种原因
+> （`diagnose_retrieval_cause`）；部分查询失败不再静默——失败原因写入报告新增的「检索明细」表。
+
 **方案**：
 - 每次检索打印：query、命中数、最高相似度
 - 命中为 0 时区分并提示**三种**情况：RAGFlow 不可达 / dataset 不存在 / 库空或阈值过高
@@ -226,7 +257,7 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ---
 
-### T7【P2】知识库入库收尾
+### T7【P2】知识库入库收尾 ⏳ 未开始
 
 - 论文组补齐（含 12 篇卡 `RUNNING` 的，**必须带 `--include-running`**）
 - B 方案专著组开跑：`--group books_b --include-running --wave 5 --wait --auto-restart --stall-minutes 20`
@@ -236,7 +267,7 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ---
 
-### T8【P2】检索回归集（改动护栏）
+### T8【P2】检索回归集（改动护栏）⏳ 未开始（需教授提供 20 组历史需求）
 
 需要教授提供 **20 组历史绘图需求** + 每组**期望命中的文献/页码**。
 产出 `tests/regression/retrieval_cases.json` + 可重复脚本，输出命中率与前 k 命中明细。
@@ -244,7 +275,7 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 
 ---
 
-### T9【P2】引用页码抽检工具
+### T9【P2】引用页码抽检工具 ⏳ 未开始
 
 随机抽 N 条引用，输出其 `document_name + page` 与原文片段，供人工核对页码是否准确
 （页码口径：`positions[0][0]` 为 0 基，客户端 +1；**不要改**）。
@@ -275,6 +306,18 @@ python main.py --revise output/run_20260922_183750 --feedback "图内标注改�
 ---
 
 ## 7. 已知坑速查（动手前先看）
+
+### 7.1 本轮新增（T1–T6 踩到的）
+
+| 现象 | 原因 / 处置 |
+|---|---|
+| 单测里改 `NO_PROXY` 又改 `no_proxy`，断言互相覆盖 | Windows 环境变量大小写不敏感，两个名字是同一个变量 |
+| `importlib.reload(config)` 之后 `assertRaises(ConfigError)` 失效 | reload 会**重建类对象**，import 时绑定的旧类不再匹配；测试里改用 `config_mod.X` 动态取 |
+| 修订旧 run 时拿到了"别人的"知识上下文 | `knowledge/knowledge_summary.md` 是全局文件、每次运行覆盖；已改为 run 目录留快照，`--revise` 优先读快照 |
+| 上游不支持 `images.edit` | 自动降级为纯提示词重绘，**降级事实必须写进报告**（`ImageResult.note`） |
+
+### 7.2 原有
+
 
 | 文档 | 内容 |
 |---|---|

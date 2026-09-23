@@ -25,6 +25,8 @@ def _fake_config(mode: str = "rag") -> Config:
         img_base_url="http://img.test/v1", img_api_key="sk-img", img_model="test-img",
         img_size="1024x1024",
         vision_base_url="http://llm.test/v1", vision_api_key="sk-llm", vision_model="test-llm",
+        text_mode="caption_only",
+        llm_timeout=300, knowledge_timeout=600, vision_timeout=300, image_timeout=300, llm_retries=2,
         max_attempts=1, search_enabled=False, search_top_k=5, search_proxy=None,
         per_file_char_limit=30000,
         refs_dir=tmp / "references", output_dir=tmp / "output",
@@ -149,8 +151,8 @@ _FAKE_LLM_JSON = json.dumps({
 
 
 def _fake_openai(content: str):
-    """返回可替换 knowledge.OpenAI 的工厂，chat 固定返回 content。"""
-    def factory(api_key=None, base_url=None):
+    """返回可替换 knowledge._client 的工厂，chat 固定返回 content。"""
+    def factory(api_key=None, base_url=None, **kwargs):
         m = MagicMock()
         m.chat.completions.create.return_value = MagicMock(
             choices=[MagicMock(message=MagicMock(content=content))])
@@ -162,13 +164,13 @@ class TestPlanQueries(unittest.TestCase):
     def test_plan_ok(self):
         import knowledge
         content = json.dumps({"queries": ["绿松石龙形器", "龙形器 二里头", "绿松石 镶嵌 工艺"]}, ensure_ascii=False)
-        with patch.object(knowledge, "OpenAI", _fake_openai(content)):
+        with patch.object(knowledge, "_client", _fake_openai(content)):
             queries = knowledge.plan_queries("k", "u", "m", "画绿松石龙形器")
         self.assertEqual(len(queries), 3)
 
     def test_plan_fallback_on_bad_json(self):
         import knowledge
-        with patch.object(knowledge, "OpenAI", _fake_openai("不是 JSON")):
+        with patch.object(knowledge, "_client", _fake_openai("不是 JSON")):
             queries = knowledge.plan_queries("k", "u", "m", "画绿松石龙形器")
         self.assertEqual(queries, ["画绿松石龙形器"])
 
@@ -185,7 +187,7 @@ class TestLearnWithChunks(unittest.TestCase):
         chunks = [{"content": "龙身呈匚形", "document_name": "发掘报告.pdf",
                    "page": 3, "similarity": 0.8, "keywords": []}]
         with patch.object(knowledge, "_chat", fake_chat), \
-             patch.object(knowledge, "OpenAI", _fake_openai(_FAKE_LLM_JSON)):
+             patch.object(knowledge, "_client", _fake_openai(_FAKE_LLM_JSON)):
             result = knowledge.learn("k", "u", "m", "画龙形器", refs=[], chunks=chunks)
         self.assertIn("[来源: 发掘报告.pdf p.3]", captured["user"])
         self.assertIn("每条实质性断言必须紧跟出处标注", captured["user"])
@@ -193,7 +195,7 @@ class TestLearnWithChunks(unittest.TestCase):
 
     def test_empty_chunks_falls_back_to_refs_path(self):
         import knowledge
-        with patch.object(knowledge, "OpenAI", _fake_openai(_FAKE_LLM_JSON)), \
+        with patch.object(knowledge, "_client", _fake_openai(_FAKE_LLM_JSON)), \
              patch.object(knowledge, "_chat", return_value=_FAKE_LLM_JSON):
             result = knowledge.learn("k", "u", "m", "需求", refs=[])
         self.assertIn("image_prompt_zh", result)
@@ -230,7 +232,7 @@ class TestPipelineRagMode(unittest.TestCase):
              patch.object(pipeline, "RAGFlowClient", return_value=fake_rf), \
              patch.object(pipeline.knowledge, "learn", return_value=learned) as mock_learn, \
              patch.object(pipeline.generate, "generate_image",
-                          side_effect=lambda _k, _u, _m, _s, _p, path: Path(path).write_bytes(b"\x89PNG fake")) as mock_gen, \
+                          side_effect=lambda _k, _u, _m, _s, _p, path, **kw: Path(path).write_bytes(b"\x89PNG fake")) as mock_gen, \
              patch.object(pipeline.verify, "verify_image",
                           return_value={"pass": True, "score": 9, "problems": [], "suggestions": ""}):
             if mode == "local":
@@ -403,7 +405,7 @@ class TestCheckLlmProbe(unittest.TestCase):
     def test_ok_first_try(self):
         import check
         fake = _FakeChatClient()
-        with patch.object(check, "OpenAI", fake):
+        with patch.object(check.config_mod, "OpenAI", fake):
             ok, detail = check.check_llm(self._cfg())
         self.assertTrue(ok)
         self.assertEqual(fake.state["n"], 1)
@@ -412,7 +414,7 @@ class TestCheckLlmProbe(unittest.TestCase):
     def test_retry_on_short_input_guard(self):
         import check
         fake = _FakeChatClient(fail_times=1)  # 首轮被风控拦，加长后通过
-        with patch.object(check, "OpenAI", fake):
+        with patch.object(check.config_mod, "OpenAI", fake):
             ok, detail = check.check_llm(self._cfg())
         self.assertTrue(ok)
         self.assertEqual(fake.state["n"], 2)
@@ -421,7 +423,7 @@ class TestCheckLlmProbe(unittest.TestCase):
     def test_guard_persists(self):
         import check
         fake = _FakeChatClient(persist_marker=True)
-        with patch.object(check, "OpenAI", fake):
+        with patch.object(check.config_mod, "OpenAI", fake):
             ok, detail = check.check_llm(self._cfg())
         self.assertFalse(ok)
         self.assertIn("风控", detail)
@@ -430,7 +432,7 @@ class TestCheckLlmProbe(unittest.TestCase):
     def test_other_error_no_retry(self):
         import check
         fake = _FakeChatClient(fail_times=1, message="invalid api key")
-        with patch.object(check, "OpenAI", fake):
+        with patch.object(check.config_mod, "OpenAI", fake):
             ok, detail = check.check_llm(self._cfg())
         self.assertFalse(ok)
         self.assertIn("invalid api key", detail)
@@ -465,7 +467,7 @@ class TestSearchPolicyAndReport(unittest.TestCase):
              patch.object(pipeline, "RAGFlowClient", return_value=fake_rf), \
              patch.object(pipeline.knowledge, "learn", return_value=learned), \
              patch.object(pipeline.generate, "generate_image",
-                          side_effect=lambda _k, _u, _m, _s, _p, path: Path(path).write_bytes(b"\x89PNG")), \
+                          side_effect=lambda _k, _u, _m, _s, _p, path, **kw: Path(path).write_bytes(b"\x89PNG")), \
              patch.object(pipeline.verify, "verify_image",
                           return_value={"pass": True, "score": 9, "problems": [], "suggestions": ""}), \
              patch.object(search, "web_search", return_value=web_hits) as mock_web, \

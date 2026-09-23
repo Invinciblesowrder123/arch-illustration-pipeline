@@ -1,27 +1,30 @@
 # 考古学论文插图生成助手
 
-**v1.0.0**（2026-09-22）· 本版主题：**RAGFlow 知识层接入** · [更新日志](CHANGELOG.md)
+**v1.1.0**（2026-09-23）· 本版主题：**指定重绘 + 图内文字约束** · [更新日志](CHANGELOG.md)
 
 把「参考文献 → 学术插图」变成一条可复核的自动化流水线：AI 先学习文献知识，产出结构化绘图规格与
 提示词，调用绘图模型出图，再由视觉模型扮演"审稿人"逐项核对插图与文献——**不合格自动带问题清单
-重绘，通过才交付**。本版起，知识来源可以是**几百篇文献的检索式知识库**（RAGFlow），
-且每条断言都能标注 `[文献 p.X]` 出处。
+重绘，通过才交付**。知识来源可以是**几百篇文献的检索式知识库**（RAGFlow），
+每条断言都能标注 `[文献 p.X]` 出处；**教授看着图提意见时，也能带着意见重绘新一版**。
 
 ```
 ① 描述需求 ──┐
              ├─→ ② 取知识 ─→ ③ 学习+汇总 ─→ ④ 绘图 ─→ ⑤ 审稿校验 ─→ ⑥ 通过则交付
 文献进知识库 ─┘   （rag 检索 / local 直读）                    ↑              │
                                                              └─ 不合格重绘 ←┘
+                    人工反馈 ─→ --revise（指定重绘）─→ 新一版 + 逐条判定报告
 ```
 
 ## 这个版本有什么不一样
 
 | 能力 | 说明 |
 |---|---|
+| **指定重绘（新）** | `--revise output/run_xxx --feedback "…"`：按人工意见出修订版，**逐条回应**反馈、未指定的方面不得漂移；链式修订时保留项累积继承 |
+| **图内文字策略（新）** | `TEXT_MODE` 默认 `caption_only`：图内不出现任何文字、标注改走**图下图注表**；另有 `in_image`（图内强制简体中文），两条路都能跑通 |
 | **知识层双模式** | `local` 直读 `references/` 目录；`rag` 从 RAGFlow 文献库检索（`.env` 配齐即自动启用） |
 | **引用可溯源** | rag 模式下需求先拆成 3-5 组检索词分别检索、合并去重，知识摘要断言带 `[文献 p.X]`，报告附引用文献列表（含页码） |
-| **语料工程化** | 配套入库脚本：体检 → 去重 → 清单化 → 分批入库，可中断续跑、失败自动重试 |
-| **真机验收** | 本机部署 RAGFlow v0.27.2 后 `--check` 4 项全绿、`--mode rag` 端到端跑通（详见 [CHANGELOG](CHANGELOG.md)） |
+| **可诊断** | `--check` 打印环境指纹（跨机器逐行对比）；检索零命中会自动区分"不可达 / 库不存在 / 库空或阈值过高" |
+| **真机验收** | 本机部署 RAGFlow v0.27.2 后 `--mode rag` 端到端跑通；单测 86 项全绿（详见 [CHANGELOG](CHANGELOG.md)） |
 
 ## 适用场景
 
@@ -128,6 +131,42 @@ python main.py --max-attempts 5       # 需要更多轮次
 > 若报告显示"达到最大重试次数仍未通过"，说明插图与文献确实存在出入，问题已逐条列出——
 > 据此修改需求或补充文献后重跑即可。
 
+## 指定重绘：教授看了图提意见之后（v1.1.0 新增）
+
+自动重绘只解决"模型自己判不通过"。**教授人眼看着某处不对**时，用 `--revise` 把意见带进去：
+
+```powershell
+python main.py --revise output/run_20260922_183750 `
+  --feedback "图内标注改成中文；底部比例尺移到右下角；镶嵌片不要规则化"
+```
+
+产物在 `output/run_20260922_183750_rev1/`：新图 + 报告。报告逐条写明
+**反馈原文 → 结构化后的 must_change / must_keep → 每条改了没有、证据在图面什么位置 → 最终结论**。
+
+| 参数 | 作用 |
+|---|---|
+| `--refine-from final\|last\|<文件名>` | 以哪一版为修订基准（默认 `last`=最后一张尝试图） |
+| `--must-change "A,B"` | 手工指定必须改的项（不给则由模型从反馈里拆） |
+| `--must-keep "构图,视角,器物形制"` | 手工指定**必须保持**的项；链式修订时会累积继承 |
+| `--text-mode in_image\|caption_only` | 本次图内文字策略（覆盖 `.env`） |
+| `--re-retrieve` | 反馈涉及"文献依据有问题"时才重新检索（默认沿用原知识上下文，避免漂移） |
+
+三条防跑偏的设计：① 未提及的维度写进提示词禁止改动，**并且校验会真的检查**；
+② 修订校验同时看上一版与本轮新版两张图，漂移判定有依据；
+③ 上游不支持图生图时降级为纯提示词重绘，**降级事实写进报告**，不静默。
+
+> 链式修订：`--revise output/run_xxx_rev1` 可继续出 `_rev2`，`must_keep` 会累积继承。
+
+## 图内文字：`caption_only` 还是 `in_image`
+
+| 模式 | 出品 | 校验 |
+|---|---|---|
+| `caption_only`（默认） | 图内**不出现任何文字**，标注改走**图下图注表**（编号｜名称｜图上位置） | 图内出现任何文字/字母/数字/仿汉字即不通过 |
+| `in_image` | 标注写在图上，**强制简体中文** | 出现英文/乱码/不可辨伪汉字即不通过 |
+
+建议**两种各出一版给教授挑**——比争论哪个更好更快。理由：`caption_only` 正是考古线图的
+学术惯例（图内标编号、图版说明给名称），也绕开了"文生图模型渲染中文常出错字"的可靠性问题。
+
 ## 命令速查
 
 | 命令 | 作用 |
@@ -137,6 +176,8 @@ python main.py --max-attempts 5       # 需要更多轮次
 | `python main.py --check` | 连通性自检（文本/读图/绘图；配了 RAGFlow 还含知识层检索） |
 | `python main.py --dry-run` | 只验通路，不调用模型、零费用 |
 | `python main.py --mode rag` / `--mode local` | 指定知识层模式 |
+| `python main.py --revise output/run_xxx --feedback "…"` | **指定重绘**：按人工意见出修订版（报告逐条回应） |
+| `python main.py --text-mode in_image` | 图内文字策略：写进图内（默认 `caption_only` 图内无字 + 图注表） |
 | `python main.py --no-search` | local 模式禁用联网补充 |
 | `python main.py --scan-policy visual` | 扫描件强制走视觉直读 |
 | `python main.py --max-attempts 5` | 增加自动重绘轮数 |
@@ -176,6 +217,9 @@ flowchart LR
 | `IMG_SIZE` | `1024x1024` | 绘图尺寸（先小尺寸试跑省钱） |
 | `VISION_*` | 复用 LLM | 校验模型单独指定（当 LLM 不支持读图时） |
 | `MAX_ATTEMPTS` | `3` | 最大重绘轮数 |
+| `TEXT_MODE` | `caption_only` | 图内文字策略：`caption_only`=图内无字+图注表 / `in_image`=图内强制简体中文 |
+| `LLM_TIMEOUT` / `LLM_TIMEOUT_KNOWLEDGE` / `VISION_TIMEOUT` / `IMG_TIMEOUT` | 300 / 600 / 300 / 300 | 各阶段客户端超时（秒）；知识阶段默认更长 |
+| `LLM_RETRIES` | `2` | 客户端失败自动重试次数 |
 | `SEARCH_ENABLED` / `SEARCH_TOP_K` / `SEARCH_PROXY` | 1 / 5 / 空 | local 模式联网补充；国内需代理 |
 | `PER_FILE_CHAR_LIMIT` | `30000` | 单篇文献注入上限（local 模式） |
 | `MINERU_CMD` / `MINERU_BACKEND` / `MINERU_TIMEOUT` | 自动探测 / `pipeline` / 900 | 扫描件本地解析 |
@@ -208,23 +252,24 @@ flowchart LR
 ## 项目结构
 
 ```
-├── main.py                 # 命令行入口（--check / --dry-run / --mode / --version）
+├── main.py                 # 命令行入口（--check / --dry-run / --mode / --revise / --version）
 ├── setup.py                # 首次启动向导（填入 API Key）
 ├── version.py              # 版本号单一来源
 ├── config.py               # 集中配置（环境变量，启动时快速失败）
 ├── pipeline.py             # 六阶段编排器（rag/local 双模式）
 ├── ingest.py               # ② 文献摄取（local：PDF/DOCX/TXT/MD + 扫描件回退链）
 ├── mineru_detect.py        # MinerU 自动探测
-├── knowledge.py            # ③ 知识学习（检索规划器 + 结构化规格 + 提示词）
+├── knowledge.py            # ③ 知识学习（检索规划器 + 结构化规格 + 提示词 + 图注表）
 ├── ragflow_client.py       # RAGFlow 客户端（检索 / 上传 / dataset 管理）
 ├── search.py               # ③ 联网补充搜索（local 模式，可选）
-├── generate.py             # ④ 绘图模型调用
-├── verify.py               # ⑤ 视觉模型审稿
+├── generate.py             # ④ 绘图模型调用（文生图 / 图生图）
+├── verify.py               # ⑤ 视觉模型审稿（含图内文字判定、指定重绘逐条判定）
+├── revise.py               # ★ 指定重绘：人工反馈 → 修订版 + 逐条判定报告
 ├── check.py                # 连通性自检（文本/读图/绘图/知识层）
 ├── logger.py / errors.py   # 日志与异常
 ├── scripts/                # RAGFlow 运维：bootstrap / ops / ingest
 ├── tests/                  # mock 单测（不访问网络、不产生费用）
-├── docs/                   # 架构、入库手册、交接文档、待办
+├── docs/                   # 架构、入库手册、交接文档、任务书与待办
 ├── references/             # 参考文献目录（_broken/ 与 _duplicates/ 为归档）
 ├── knowledge/              # 知识摘要、绘图规格、语料体检报告与入库清单
 └── output/                 # 每次运行的插图与报告
@@ -236,8 +281,9 @@ flowchart LR
 python -m unittest discover -s tests -t .
 ```
 
-全部为 mock 单测：不访问网络、不产生费用，覆盖 RAGFlow 客户端字段归一化、双模式解析、
-检索策略、探针重试、报告引用等。当前 **34 项全绿**。
+全部为 mock 单测：不访问网络、不产生费用。覆盖 RAGFlow 客户端字段归一化、双模式解析、
+检索策略与零命中确诊、探针重试、报告引用、**指定重绘全链路（反馈结构化 / 逐条判定 /
+链式 must_keep 继承）**、图内文字判定、代理清洗、客户端工厂等。当前 **86 项全绿**。
 
 ## 常见问题
 
@@ -257,6 +303,7 @@ python -m unittest discover -s tests -t .
 
 - `--check` 会真实生成 1 张测试图（`--skip-image` 可免）；`--dry-run` 零费用。
 - 正式运行每次至少：1-2 次语言模型调用 + 1 张图；每多一轮重绘多一张图。
+- **指定重绘（`--revise`）按张计费**：反馈结构化 1 次轻量调用 + 每轮 1 张图（+1 次读图校验）。
 - 绘图按张计费，建议先用 `IMG_SIZE` 小尺寸试跑。
 
 ## 边界与已知限制
@@ -269,7 +316,7 @@ python -m unittest discover -s tests -t .
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.0.0**（2026-09-22）。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.1.0**（2026-09-23）。
 
 ## License
 

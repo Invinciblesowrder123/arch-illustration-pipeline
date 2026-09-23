@@ -197,3 +197,38 @@ def merge_chunks(chunk_lists: list[list[dict]], top_k: int) -> list[dict]:
             merged.append(c)
     merged.sort(key=lambda c: c["similarity"], reverse=True)
     return merged[:top_k]
+
+
+def diagnose_retrieval_cause(
+    client: "RAGFlowClient",
+    dataset_ids: list[str],
+    probe_question: str = "考古 器物 复原",
+) -> str:
+    """零命中时区分三种情况（T6），返回一句可直接写进日志/报告的判断。
+
+    三种情况必须分开，因为处置完全不同：
+    1. **RAGFlow 不可达** —— 核对地址/端口/容器是否在跑；
+    2. **dataset 不存在** —— 核对 RAGFLOW_DATASET_ID；
+    3. **库空或未解析完 / 阈值过高** —— 用阈值 0 复探一次即可区分：
+       复探有命中说明是阈值问题，复探仍为空说明库里确实没有可用内容。
+    """
+    try:
+        datasets = client.list_datasets()
+    except RagflowError as e:
+        return (f"RAGFlow 不可达或鉴权失败：{e.message}"
+                f"（请确认服务在跑、地址端口正确、RAGFLOW_API_KEY 有效）")
+    known = {d.get("id") for d in datasets}
+    missing = [d for d in dataset_ids if d not in known]
+    if missing:
+        return (f"配置的 dataset 不存在：{missing}（服务端现有 {len(known)} 个 dataset，"
+                f"请核对 RAGFLOW_DATASET_ID）")
+    try:
+        hits = client.retrieve(probe_question, dataset_ids,
+                               top_k=3, similarity_threshold=0.0, page_size=3)
+    except RagflowError as e:
+        return f"检索接口报错：{e.message}"
+    if hits:
+        return ("接口可达、dataset 存在、库内有内容，但当前相似度阈值下零命中——"
+                "多半是 RETRIEVAL_SIM_THRESHOLD 设得过高，下调后重试")
+    return ("接口可达、dataset 存在，但该库在阈值 0 下也检索不到任何内容——"
+            "文献可能尚未完成解析入库，或 dataset 为空")

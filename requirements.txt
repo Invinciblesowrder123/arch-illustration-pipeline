@@ -1,9 +1,17 @@
-openai>=1.40.0
-python-dotenv>=1.0.0
-PyMuPDF>=1.24.0
-python-docx>=1.1.0
-ddgs>=9.0.0
-requests>=2.31.0
+# 直接依赖（钉住实测过的版本区间：下限为最低可用版本，上限防止大版本漂移）
+#
+# 为什么加上限：两台机器曾出现"一方 openai 2.x + httpx 0.28、另一方 openai 3.17 +
+# httpx2"，产生一整类"你这能跑我这不能跑"。下限-only 的写法挡不住大版本跳跃。
+# 注意 openai 3.x 起改用 httpx2（不再依赖 httpx）——本项目不直接 import httpx，
+# 故这里不列 httpx；实际生效的组合请以 `python main.py --check` 打印的环境指纹为准。
+# 本机实测的**精确**组合见 requirements.lock.txt（完整 pip freeze，含间接依赖）。
+
+openai>=2.0.0,<4.0.0
+python-dotenv>=1.0.0,<2.0.0
+PyMuPDF>=1.24.0,<2.0.0
+python-docx>=1.1.0,<2.0.0
+ddgs>=9.0.0,<10.0.0
+requests>=2.31.0,<3.0.0
 
 # ---- RAGFlow 知识层（--mode rag）----
 # 无需额外依赖：通过上面的 requests 直接调用 RAGFlow HTTP API（ragflow_client.py），

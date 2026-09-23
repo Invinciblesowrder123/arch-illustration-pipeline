@@ -35,6 +35,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="只检查文献能否读取，不调用模型、不产生费用")
     p.add_argument("--check", action="store_true", help="模型连通性自检（文本/读图/绘图各实测一次）")
     p.add_argument("--skip-image", action="store_true", help="配合 --check：跳过绘图测试，不产生绘图费用")
+    p.add_argument("--text-mode", choices=["caption_only", "in_image"], default=None,
+                   help="图内文字策略：caption_only=图内不出现任何文字、标注改走图注表（默认）；"
+                        "in_image=图内标注强制简体中文。不给则读 .env 的 TEXT_MODE")
+    # ---- T1 指定重绘（人工反馈驱动）----
+    p.add_argument("--revise", type=Path, metavar="RUN_DIR",
+                   help="指定重绘：以某次 run 为基准，按 --feedback 出修订版（如 output/run_20260922_183750）")
+    p.add_argument("--feedback", metavar="TEXT", help="人工反馈原文（配合 --revise 使用）")
+    p.add_argument("--refine-from", default="last", metavar="final|last|<文件名>",
+                   help="以哪一版为修订基准（默认 last=最后一张尝试图；final=当时通过的那张）")
+    p.add_argument("--must-change", metavar="A,B", help="手工指定必须改的项（逗号分隔；不给则由模型从反馈拆）")
+    p.add_argument("--must-keep", metavar="A,B", help="手工指定必须保持的项（逗号分隔；会与继承的项合并）")
+    p.add_argument("--re-retrieve", action="store_true",
+                   help="反馈涉及文献依据时允许重新检索知识（默认沿用基准 run 的知识上下文，避免漂移）")
     p.add_argument("--scan-policy", choices=["auto", "mineru", "visual", "skip"], default="auto",
                    help="扫描版 PDF（无文字层）处理策略：auto=交互询问；mineru=MinerU本地解析；"
                         "visual=渲染成图片交给多模态模型直读；skip=跳过（默认 auto）")
@@ -85,6 +98,10 @@ def main() -> int:
     except ConfigError as e:
         print(f"[配置错误] {e}")
         return 2
+
+    # 命令行显式指定优先于 .env（T2）
+    if args.text_mode:
+        cfg.text_mode = args.text_mode
 
     if args.check:
         from logger import setup_logging
@@ -142,6 +159,44 @@ def main() -> int:
     from logger import setup_logging
     logger = setup_logging(cfg.log_dir)
     _log_banner(logger)
+
+    # ---- T1 指定重绘：人工反馈驱动，走独立编排（revise.py）----
+    if args.revise:
+        if args.dry_run:
+            print("[参数错误] --revise 与 --dry-run 不能同时使用（指定重绘会真实调用模型）。")
+            return 2
+        if not args.feedback:
+            print("[参数错误] --revise 必须配合 --feedback \"<教授的修改意见>\"。")
+            return 2
+        from revise import revise_run
+        logger.info(f"指定重绘：基准 run = {args.revise}")
+        logger.info(f"人工反馈：{args.feedback}")
+        try:
+            r = revise_run(
+                cfg, args.revise, args.feedback,
+                refine_from=args.refine_from,
+                must_change_arg=args.must_change,
+                must_keep_arg=args.must_keep,
+                text_mode=args.text_mode,
+                max_attempts=args.max_attempts,
+                re_retrieve=args.re_re_retrieve,
+                requirement_fallback=args.requirement or "",
+            )
+        except AppError as e:
+            logger.error(f"指定重绘中止: {e.message}")
+            if e.detail:
+                logger.debug(f"细节: {e.detail}")
+            return 1
+        print("=" * 60)
+        print(f"📁 修订版目录: {r['out_dir']}")
+        if r["final_image"]:
+            print(f"✅ 修订通过，最终插图: {r['final_image']}")
+        else:
+            print("⚠️ 仍有反馈项未落实或存在漂移，逐条判定见报告")
+        print(f"📄 报告: {r['report']}")
+        print(f"🔧 must_change {len(r['must_change'])} 条 / must_keep {len(r['must_keep'])} 条")
+        print("=" * 60)
+        return 0 if r["ok"] else 1
 
     requirement = get_requirement(args)
     logger.info(f"绘图需求: {requirement}")

@@ -6,24 +6,31 @@
   python main.py --check --skip-image  # 跳过绘图测试（不产生绘图费用）
 首次启动向导写入密钥后会自动执行一次。
 配置了 RAGFlow（RAGFLOW_BASE_URL/API_KEY/DATASET_ID）时自动追加知识层探测。
+自检开头打印**环境指纹**（T3）：两台机器的自检输出可直接逐行对比，定位"你这能跑我这不能跑"。
 """
 from __future__ import annotations
 
 import base64
 import logging
+import platform
 import struct
+import sys
 import zlib
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-from openai import OpenAI
-
+import config as config_mod
 from errors import RagflowError
 from ragflow_client import RAGFlowClient
+from version import __version__
 
 logger = logging.getLogger("painter")
 
 # 探测请求超时（秒）。部分中转服务商对短输入会先做风控判定再返回，
 # 实测 aixw 单次可耗 70s+，故给足余量，避免把"上游慢"误报成"链路不通"。
 CHECK_TIMEOUT = 180
+
+# 环境指纹里要打印的库（两台机器对比时最有用的那几个）
+FINGERPRINT_PACKAGES = ("openai", "httpx", "httpx2", "requests", "PyMuPDF", "python-docx", "ddgs")
 
 # 探测提示词：必须是"有实际内容的正常任务"，而不是心跳式短询问。
 # 实测 aixw 上游会对短输入做风控，报
@@ -49,6 +56,43 @@ _PROBE_PROMPT_EXTENDED = _PROBE_PROMPT + (
 )
 
 _SHORT_INPUT_MARKERS = ("short-input distillation", "heartbeat probing")
+
+
+def _pkg_versions() -> str:
+    parts = []
+    for name in FINGERPRINT_PACKAGES:
+        try:
+            parts.append(f"{name}={_pkg_version(name)}")
+        except PackageNotFoundError:
+            parts.append(f"{name}=未安装")
+        except Exception as e:  # 元数据异常不应中断自检
+            parts.append(f"{name}=读取失败({type(e).__name__})")
+    return ", ".join(parts)
+
+
+def env_identity() -> list[str]:
+    """环境指纹（T3）：跨机器排查"你这能跑我这不能跑"时直接逐行对比。"""
+    return [
+        f"项目版本: arch-illustration {__version__}",
+        f"Python: {sys.version.split()[0]} ({platform.python_implementation()}) "
+        f"/ {platform.platform()}",
+        f"关键库: {_pkg_versions()}",
+    ]
+
+
+def _print_env_identity(cfg=None) -> None:
+    logger.info("环境指纹（两台机器可直接逐行对比）:")
+    for line in env_identity():
+        logger.info(f"  - {line}")
+    if cfg is not None:
+        logger.info("生效的客户端参数（T5，来自 .env）: "
+                    f"LLM_TIMEOUT={cfg.llm_timeout}s, "
+                    f"LLM_TIMEOUT_KNOWLEDGE={cfg.knowledge_timeout}s, "
+                    f"VISION_TIMEOUT={cfg.vision_timeout}s, "
+                    f"IMG_TIMEOUT={cfg.image_timeout}s, "
+                    f"LLM_RETRIES={cfg.llm_retries}, "
+                    f"CHECK_TIMEOUT={CHECK_TIMEOUT}s")
+        logger.info(f"图内文字策略 TEXT_MODE={cfg.text_mode}")
 
 
 def _tiny_png(w: int = 64, h: int = 64, rgb: tuple = (200, 60, 60)) -> bytes:
@@ -80,7 +124,8 @@ def check_llm(cfg) -> tuple[bool, str]:
     探针用一段真实的知识整理任务而非"只回复 ok"式短询问——部分中转服务商
     （实测 aixw）会对短输入做风控直接 400；若仍被拦，自动加长后重试一次。
     """
-    client = OpenAI(api_key=cfg.llm_api_key, base_url=cfg.llm_base_url, timeout=CHECK_TIMEOUT)
+    client = config_mod.make_openai_client(cfg.llm_api_key, cfg.llm_base_url,
+                                           timeout=CHECK_TIMEOUT, max_retries=cfg.llm_retries)
     attempts = [("", _PROBE_PROMPT), ("（短输入风控拦截，已加长提示后重试）", _PROBE_PROMPT_EXTENDED)]
     for idx, (note, prompt) in enumerate(attempts):
         try:
@@ -105,7 +150,8 @@ def check_llm(cfg) -> tuple[bool, str]:
 
 def check_vision(cfg) -> tuple[bool, str]:
     """视觉读图能力（阶段⑤校验依赖）。同样避免短询问，并被拦时加长重试。"""
-    client = OpenAI(api_key=cfg.vision_api_key, base_url=cfg.vision_base_url, timeout=CHECK_TIMEOUT)
+    client = config_mod.make_openai_client(cfg.vision_api_key, cfg.vision_base_url,
+                                           timeout=CHECK_TIMEOUT, max_retries=cfg.llm_retries)
     data_uri = "data:image/png;base64," + base64.b64encode(_tiny_png()).decode()
     question = (
         "这是一张用于测试图像识别能力的图片文件，请仔细查看后依次回答：\n"
@@ -145,7 +191,8 @@ def check_vision(cfg) -> tuple[bool, str]:
 def check_image(cfg) -> tuple[bool, str]:
     """真实生成一张小图（会产生一次绘图调用费用）。"""
     try:
-        client = OpenAI(api_key=cfg.img_api_key, base_url=cfg.img_base_url, timeout=300)
+        client = config_mod.make_openai_client(cfg.img_api_key, cfg.img_base_url,
+                                               timeout=cfg.image_timeout, max_retries=cfg.llm_retries)
         resp = client.images.generate(
             model=cfg.img_model,
             prompt="a simple black line drawing of a pottery vase, academic illustration style",
@@ -194,6 +241,7 @@ def check_ragflow(cfg) -> tuple[bool, str]:
 def run_checks(cfg, skip_image: bool = False) -> bool:
     rag_configured = bool(cfg.ragflow_base_url and cfg.ragflow_api_key and cfg.ragflow_dataset_ids)
     total = 3 + (1 if rag_configured else 0)
+    _print_env_identity(cfg)
     logger.info(f"开始连通性自检（{total} 项）…")
     results = []
     results.append(("文本模型（知识学习）", check_llm(cfg)))
