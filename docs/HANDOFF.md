@@ -122,12 +122,15 @@ python scripts\ragflow_ingest.py --group all --status-only  # 看进度
 - Python 项目 venv：`D:/AI/Painter/.venv`（依赖已装好）
 - MinerU：`D:/AI/R/.venv-mineru`（探测逻辑会自动发现，无需写死路径）
 - 教授文献：215 篇在 `references/`（已被 .gitignore 排除，仅在本地）
-- **代理坑（必读）**：shell 环境变量里的代理端口**会随本机代理软件变化**，别照抄旧端口。
-  排查步骤：先 `curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://github.com` 测代理，
-  再 `curl ... --noproxy '*'` 测直连。**2026-09-23 实测：环境里的 `127.0.0.1:8041` 不通
-  （HTTP 000 超时），直连可用（HTTP 200，1.5s）** —— 此时 git/gh 联网要显式绕开代理：
-  `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git push origin main --tags`。
-  （历史记录里的 10939 / 7890 同理，都要当场测，不要盲信。）
+- **代理坑（必读）**：这台机器的代理端口**一直在变**，别照抄任何旧端口，当场测。
+  2026-09-24 复查：直连 GitHub 正常（HTTP 200 / 1s），而 `.gitconfig` 里有 **URL 级代理**
+  `http.https://github.com/.proxy=http://127.0.0.1:7890` —— 端口已死。坑点在于：
+  `env -u http_proxy ...` 或 `git -c http.proxy=` **都清不掉它**（URL 级配置优先级更高），
+  push 会报 `over proxy 127.0.0.1` 失败。**正确做法：用 gitconfig 里现成的 alias——
+  `git direct push origin main`（direct=绕过 github 代理，ghproxy=走代理）**；
+  或临时 `git -c http.https://github.com/.proxy= push`。
+  排查口诀：`curl --noproxy '*' https://github.com` 测直连 → 通就不用任何代理；
+  git 报 "over proxy 127.0.0.1" 八成是 URL 级配置，用 `git config --list --show-origin | grep -i proxy` 定位。
 - git 身份：本仓库用 repo-local config（Invinciblesowrder123 + noreply 邮箱）
 - 发布流程：`git tag -a v<版本> -m "…"` → push main 与 tags → `gh release create v<版本> --notes-file <文件>`
   （`--notes-file` 用文件而不是 heredoc：命令行里出现 `powershell` 字样会被本机安全策略误判拦截）
