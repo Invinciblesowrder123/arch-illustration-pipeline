@@ -178,6 +178,7 @@ python scripts/ragflow_ops.py retrieve "昙石山遗址的贝壳堆积与年代"
 | 解析报 `file type not supported yet(pdf supported)` | `paper` 切片只支持 PDF | DOCX/TXT 改写/转 PDF（或另建 `naive` 库） |
 | 某篇解析 `FAIL`，`progress_msg` 报 `tei ... Read timed out` | 并发过高把嵌入服务打爆 | 重跑（`--retry-fail`）即可；下次用 `--wave` 降并发 |
 | 触发解析接口报 `Internal server error` | 文档多/负载高时接口偶发 500 | 脚本已自动小批量 + 退避重试；仍失败会在空闲时补触发 |
+| **触发解析**持续报 `Internal server error`（code=102，重试 3 次全挂，与负载无关） | **该 PDF 文件损坏**——`pdfminer: No /Root object!`（下载截断/伪装成 PDF，特征：页数明显不对，如 1–2 页的 Nature 论文）。服务端 `queue_tasks` 先算页数，坏文件直接 500 | 本地用 PyMuPDF 体检（`is_pdf` + 页数对不对）→ 坏文件移 `references/_broken/` → 删库内记录 → 教授重下后重传。**2026-09-24 实测：11 篇全是这类；脚本曾对它们一夜重启容器 12 次全是空转**（现已加固：补触发全失败即标记跳过） |
 | **★ 进度长时间不涨，多篇卡在 `RUNNING` 且进度 0%** | **task_executor 静默停摆** | 见下方专节 |
 | 检索结果全是同一篇 | 语料集中在少数文献 | 正常；按 §5.1 建回归集再调 chunk/阈值 |
 | 检索命中率低 | 术语不一致（"昙石山" vs "曇石山"） | 建术语/同义词表（RAGFlow 术语重写），或让查询规划器多出几组词 |

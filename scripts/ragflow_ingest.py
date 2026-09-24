@@ -235,6 +235,11 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
     此时队列不会自己恢复，必须重启容器。故：
       · 连续 stall_minutes 分钟「无任何文档完成」且仍有 RUNNING → 判定停摆，先补触发，
         再等一轮；仍无进展且开了 --auto-restart → 重启容器。
+
+    损坏文件识别（2026-09-24 教训）：**补触发全部被服务端拒收**（code=102
+    "Internal server error"，根因多为 PDF 损坏缺 /Root）时，重启容器救不回来——
+    无人值守跑了一夜、每 20 分钟重启一次、一晚 12 次全是空转。此时把这些文档
+    标记为 unfixable 并跳过：脚本继续等其余文档，坏文件由人工修复后重传补齐。
     """
     t0 = time.time()
     idle_hits = 0
@@ -242,6 +247,7 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
     last_done = None
     last_progress_at = time.time()
     restarts = 0
+    unfixable: set[str] = set()
     _, docs0 = progress_snapshot(dataset_id)
     if allowed is not None:
         docs0 = [d for d in docs0 if d.get("name") in allowed]
@@ -258,26 +264,29 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
         done_pages = sum(page_map.get(d["name"], 0) for d in docs if d.get("run") == "DONE")
         total_pages = sum(page_map.get(d["name"], 0) for d in docs)
         elapsed = time.time() - t0
+        # 疑似损坏（服务端拒收）的文档不计入"运行中"——否则脚本会为它们等到超时
+        eff_running = [d for d in docs if d.get("run") == "RUNNING" and d["id"] not in unfixable]
         # 速率按「本次运行期间的增量」计算——否则会把历史耗时算进本次，ETA 严重偏小
         new_docs = counts.get("DONE", 0) - base_done
         new_pages = done_pages - base_pages
         eta = ""
         if new_docs > 0 and elapsed > 30:
-            remain = counts.get("RUNNING", 0) + counts.get("UNSTART", 0)
+            remain = len(eff_running) + counts.get("UNSTART", 0)
             rate_pages = new_pages / elapsed
             eta = (f"　本次 {new_pages} 页/{(elapsed/60):.0f}min = {rate_pages*60:.1f} 页/分钟"
                    f"　预计剩余 {(total_pages - done_pages) / rate_pages / 60:.0f} 分钟"
                    if rate_pages > 0 else f"　剩余 {remain} 篇")
+        skip_note = f" · 跳过疑似损坏 {len(unfixable)}" if unfixable else ""
         print(f"[{elapsed/60:5.1f}min] 完成 {counts.get('DONE',0)} 篇/{done_pages} 页"
-              f" · 运行中 {counts.get('RUNNING',0)} · 未触发 {counts.get('UNSTART',0)}"
-              f" · 失败 {counts.get('FAIL',0)}{eta}", flush=True)
+              f" · 运行中 {len(eff_running)} · 未触发 {counts.get('UNSTART',0)}"
+              f" · 失败 {counts.get('FAIL',0)}{skip_note}{eta}", flush=True)
 
         # ---- 停摆检测：先看执行器日志是否还在写（存活探针），再决定是否干预 ----
         if last_done is None or counts.get("DONE", 0) > last_done:
             last_done = counts.get("DONE", 0)
             last_progress_at = time.time()
         stalled_min = (time.time() - last_progress_at) / 60
-        if stalled_min >= stall_minutes and counts.get("RUNNING", 0) > 0:
+        if stalled_min >= stall_minutes and len(eff_running) > 0:
             log_m = _executor_log_mtime(executor_log)
             if log_m is not None and (time.time() - log_m) < stall_minutes * 60:
                 # 执行器还在写日志 → 在干活，只是大文档没跑完，别干预
@@ -285,24 +294,29 @@ def wait_done(dataset_id: str, page_map: dict, interval: int, timeout: int,
                       f"（{int((time.time()-log_m)/60)} 分钟前），判定为大文档解析中，继续等待", flush=True)
                 last_progress_at = time.time()  # 重置窗口，避免刷屏
             else:
-                running = [d["id"] for d in docs if d.get("run") == "RUNNING"]
+                running = [d["id"] for d in eff_running]
                 why = "执行器日志已停写" if log_m is not None else "拿不到执行器日志"
                 print(f"  ⚠ 已连续 {stalled_min:.0f} 分钟零完成，有 {len(running)} 篇卡在 RUNNING，"
                       f"{why}（疑似 task_executor 停摆）", flush=True)
-                if restarts == 0 or not auto_restart:
-                    print(f"  ↻ 先补触发这 {len(running)} 篇（其任务已失效）", flush=True)
-                    trigger_parse(dataset_id, running[:30], batch=5)
-                else:
-                    print("  ⇄ 补触发无效，重启容器（--auto-restart）", flush=True)
+                ok = trigger_parse(dataset_id, running[:30], batch=5)
+                if ok == 0:
+                    # 服务端拒收全部补触发 → 文档多半损坏（如 PDF 缺 /Root）。
+                    # 重启容器救不回来，只会死循环空转（2026-09-24 实测：一夜重启 12 次）。
+                    print(f"  ✗ 补触发 0/{len(running)} 成功——服务端拒收，疑似文件损坏。"
+                          f"已跳过这 {len(running)} 篇（不再重启容器空转）；"
+                          f"修复文件后重传并重跑本命令即可补齐", flush=True)
+                    unfixable.update(running)
+                elif restarts > 0 and auto_restart:
+                    print("  ⇄ 补触发后仍零完成，重启容器（--auto-restart）", flush=True)
                     if _restart_ragflow_container():
                         print("  ✓ 容器已重启，重新触发卡住的文档", flush=True)
+                        trigger_parse(dataset_id, running[:30], batch=5)
                     else:
-                        print("  ✗ 重启失败，转为补触发", flush=True)
-                    trigger_parse(dataset_id, running[:30], batch=5)
+                        print("  ✗ 重启失败，保留补触发结果", flush=True)
                 restarts += 1
                 last_progress_at = time.time()  # 给一轮观察窗口
 
-        idle = counts.get("RUNNING", 0) == 0 and (wave_mode or counts.get("UNSTART", 0) == 0)
+        idle = not eff_running and (wave_mode or counts.get("UNSTART", 0) == 0)
         if idle:
             idle_hits += 1
             if idle_hits >= 2:  # 连续两次为空，确认不是波次间的空档

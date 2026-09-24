@@ -23,7 +23,7 @@
 |---|---|---|---|---|
 | 1 | **20 组历史绘图需求 + 期望命中的文献/页码** | 这是检索质量的"标尺"：没有它，检索参数一动就没人知道变好还是变坏 | 表格或文字都行，格式见 §2.1 | 检索调参、全量入库后的验收 |
 | 2 | **3 篇付费文献**：Ferrell 1969（纸本 444 页）、Grace 1961（*American Anthropologist* 63:359-368，Wiley）、Grace 1964（*Current Anthropology* 5:361-368，Chicago） | 无合法免费源；需机构订阅或纸本扫描 | 提供全文 PDF，或告知走什么渠道 | 这 3 篇进不了知识库 |
-| 3 | **2 个坏文件重下**：`Pawley_Green_Chapter3.pdf`（13KB，截断）、`Pawley_Prehistory_Oceanic_Languages.pdf`（42KB，截断） | 原件下载中断，打不开 | 重新下载后交给我们 | 这 2 篇进不了知识库 |
+| 3 | **13 个坏文件重下**（§2.3 有全名单） | 语料体检后实际入库时又检出 **11 个新坏文件**（下载截断/伪装成 PDF，文件打不开或页数明显不对），加上原先已知的 2 个，共 13 个 | 重新下载后交给我们 | 这 13 篇进不了知识库 |
 | 4 | **确认 `Pawley_Green_Chapter3` 的原始目标** | 疑似即已入库的《The Austronesians》第 3 章（Pawley & __Ross__），若确认是同一篇就不必再找 | 是／不是（一句话） | 避免重复入库或漏一篇 |
 | 5 | **服务器内存是多少**（只需确认） | 早先实测 bge-m3 独占 17.1GB、看着要 ≥32GB；**2026-09-24 复查更正**：那 17GB 是并发缓冲区不是模型，加上限后只要 **5GB**、整栈约 8GB → **16GB 就够，不用换模型**（§3.2 有对照表） | 告知服务器内存／核数即可 | 机器到位即开跑 |
 | 6 | **图内标注方式二选一**（见 §3.1） | 这是您上次反馈"图里是英文"的正解方向，两种都跑得通，由您定 | 勾选 A / B，或先看样图 | 批量出图的默认配置 |
@@ -58,14 +58,30 @@
 | Grace 1961 | *American Anthropologist* 63:359-368（Wiley 付费墙） | 机构订阅下载 |
 | Grace 1964 | *Current Anthropology* 5:361-368（Chicago 付费墙） | 机构订阅下载 |
 
-### 2.3 两个坏文件
+### 2.3 十三个坏文件（2026-09-24 全量复查后更新）
 
-| 文件 | 症状 |
-|---|---|
-| `Pawley_Green_Chapter3.pdf` | 13KB，下载截断，无法解析 |
-| `Pawley_Prehistory_Oceanic_Languages.pdf` | 42KB，下载截断，无法解析 |
+原先已知 2 个，入库时又检出 11 个——症状一致：**下载截断或内容不是有效 PDF**
+（有几十 KB 的、也有几百 KB 的；PyMuPDF 能打开但页数明显不对，如 1–2 页的 Nature 论文）。
+全部文件仍在本地 `references/_broken/` 归档，**只移动未删除**。
 
-请重新下载，或从原库重新导出。
+| # | 文件名 | 症状 |
+|---|---|---|
+| 1 | `Pawley_Green_Chapter3.pdf` | 13KB，下载截断 |
+| 2 | `Pawley_Prehistory_Oceanic_Languages.pdf` | 42KB，下载截断 |
+| 3 | `[36]_Chang_1970_Ceramic_Style_SE_China.pdf` | 非有效 PDF |
+| 4 | `[19]_Chang_1970_Prehistoric_Archaeology_Taiwan.pdf` | 非有效 PDF |
+| 5 | `[18]_Dyen_1963_Malayo-Polynesian_Formosa.pdf` | 非有效 PDF |
+| 6 | `Skoglund_2016_Nature_Southwest_Pacific.pdf` | 非有效 PDF |
+| 7 | `Posth_2018_Nature_Ecology_Evolution.pdf` | 非有效 PDF |
+| 8 | `Hung_2023_SciAdv_Marianas_rice.pdf` | 非有效 PDF（仅 1 页） |
+| 9 | `Diamond_1988_Nature_Express_train.pdf` | 非有效 PDF |
+| 10 | `Atkinson_2011_Science.pdf` | 非有效 PDF（仅 2 页） |
+| 11 | `8_Pawley_Green_1973_Dating_the_Dispersal.pdf` | 非有效 PDF（仅 1 页） |
+| 12 | `7_Kern_1889_Taalkundige_gegevens_English.pdf` | 非有效 PDF（仅 1 页） |
+| 13 | `2_Bellwood_1978_Mans_Conquest_of_the_Pacific.pdf` | 非有效 PDF（仅 2 页） |
+
+请重新下载（或从原库重新导出）后交付；其中 #6–#13 多为期刊论文，机构订阅下载时
+注意确认文件完整性（能打开、页数正常）。
 
 ---
 
@@ -189,7 +205,7 @@ python main.py --revise output/run_xxxx --feedback "您的意见"
 
 - [ ] 二十组检索回归集 —— 附件：__________
 - [ ] 三篇付费文献 —— 附件：__________
-- [ ] 两个坏文件重下 —— 附件：__________
+- [ ] 十三个坏文件重下（§2.3 全名单）—— 附件：__________
 - [ ] `Pawley_Green_Chapter3` 是否即《The Austronesians》第 3 章：☐ 是　☐ 不是　☐ 不确定
 
 ### 6.2 选择类

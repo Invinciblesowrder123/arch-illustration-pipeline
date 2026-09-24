@@ -43,8 +43,12 @@
 ## 遗留（非本机可闭环）
 
 - [ ] **教授侧 3 篇付费文献**：Ferrell 1969（纸本）、Grace 1961（Wiley）、Grace 1964（Chicago）——无合法免费源
-- [ ] **2 个坏文件重下**：`Pawley_Green_Chapter3.pdf`（13KB 截断）、
-  `Pawley_Prehistory_Oceanic_Languages.pdf`（42KB 截断）
+- [ ] **13 个坏文件需重下**（2026-09-24 复查更新）：原已知 2 个（`Pawley_Green_Chapter3.pdf`、
+  `Pawley_Prehistory_Oceanic_Languages.pdf`）+ 入库时新检出 11 个（Chang 1970 系列 ×2、
+  Dyen 1963、Skoglund 2016、Posth 2018、Hung 2023、Diamond 1988、Atkinson 2011、
+  Pawley-Green 1973、Kern 1889、Bellwood 1978——多为下载截断或伪装成 PDF，
+  特征是页数明显不对，如 1–2 页的 Nature 论文）。**全名单见 `docs/PROFESSOR_CHECKLIST.md` §2.3**；
+  11 个新检出文件已移至 `references/_broken/`（只移动未删除），库内记录已删。
 - [ ] **`Pawley_Green_Chapter3` 原始目标确认**：疑似即已入库的《The Austronesians》第 3 章
   （Pawley & **Ross**），需教授确认
 
