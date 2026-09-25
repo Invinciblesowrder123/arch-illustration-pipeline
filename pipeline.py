@@ -12,6 +12,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import embedding_guide
 import generate
 import knowledge
 import verify
@@ -31,6 +32,31 @@ def _refs_block(refs: list[dict]) -> str:
     return "、".join(parts)
 
 
+def _ensure_embedding_ready(client: RAGFlowClient) -> None:
+    """rag 模式预检：embedding 模型缺失时立刻失败，并把配置指引直接打给用户。
+
+    三态处理：`ready` 放行；`local`（依赖本地 TEI，API 侧判断不了）只警告不阻断，
+    真不可用时检索会失败并由 diagnose 兜底；`missing` 直接阻断并给出服务商推荐。
+    """
+    status = client.check_embedding_ready() or {}
+    state = status.get("status") if isinstance(status, dict) else ""
+    if state == "ready":
+        logger.info(f"[阶段②·rag] embedding 就绪: {status.get('tenant_embd')}")
+        return
+    if state == "missing":
+        # 只有"明确缺失"才阻断：此时后面每一组查询都必然失败，早失败省一整轮。
+        raise RagflowError(
+            f"RAGFlow 缺少可用的 embedding 模型：{status.get('reason')}",
+            detail=embedding_guide.render_setup_guide(str(status.get("reason"))),
+        )
+    # local（依赖本地 TEI）或状态未知：不阻断，真失败时由 diagnose 兜底。
+    logger.warning(
+        f"[阶段②·rag] embedding 状态待确认：{status.get('reason') or state or '未知'}。"
+        "若检索报 Provider not found，可 `ragflow_ops.py up --with-tei` 拉起本地嵌入，"
+        "或按 `ragflow_ops.py health` 的提示改配云 embedding。"
+    )
+
+
 def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list[str], list[dict]]:
     """rag 模式阶段②：查询规划 → 逐组检索 → 合并去重。
 
@@ -38,7 +64,18 @@ def _retrieve_knowledge(cfg: Config, requirement: str) -> tuple[list[dict], list
     逐个查询打印命中数与最高相似度；零命中时必须区分"不通/库不存在/库空或阈值过高"
     三种情况并**明确报错**——静默返回空会让流水线误以为"文献里没写"。
     """
-    client = RAGFlowClient(cfg.ragflow_base_url, cfg.ragflow_api_key, timeout=cfg.ragflow_timeout)
+    client = RAGFlowClient(
+        cfg.ragflow_base_url,
+        cfg.ragflow_api_key,
+        timeout=cfg.ragflow_timeout,
+        retries=cfg.ragflow_retries,
+        retry_backoff=cfg.ragflow_retry_backoff,
+    )
+    # ---- 预检：embedding 模型缺失时尽早失败并给出配置指引 ----
+    # 放在规划查询之前：缺模型时后面每一组查询都会失败，与其让用户等一轮 LLM 规划
+    # 再看一串晦涩报错，不如第一步就说清楚该去做什么。
+    _ensure_embedding_ready(client)
+
     queries = knowledge.plan_queries(
         cfg.llm_api_key, cfg.llm_base_url, cfg.llm_model, requirement,
         timeout=cfg.llm_timeout, max_retries=cfg.llm_retries)

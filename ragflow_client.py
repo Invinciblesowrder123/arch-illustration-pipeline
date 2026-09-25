@@ -14,6 +14,7 @@ API 样例见 docs/RAGFLOW_ARCHITECTURE.md §6。
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import requests
@@ -26,12 +27,19 @@ logger = logging.getLogger("painter")
 class RAGFlowClient:
     """RAGFlow 知识层 HTTP 客户端。所有失败统一抛 RagflowError。"""
 
-    def __init__(self, base_url: str, api_key: str, timeout: int = 60):
+    def __init__(self, base_url: str, api_key: str, timeout: int = 60,
+                 retries: int = 2, retry_backoff: float = 1.5):
         if not base_url or not api_key:
             raise RagflowError("RAGFlow base_url / api_key 不能为空")
+        if retries < 0:
+            raise RagflowError("RAGFlow retries 不能为负数")
+        if retry_backoff < 0:
+            raise RagflowError("RAGFlow retry_backoff 不能为负数")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.retries = retries
+        self.retry_backoff = retry_backoff
         self._session = requests.Session()
         self._session.headers.update({
             "Authorization": f"Bearer {api_key}",
@@ -41,28 +49,54 @@ class RAGFlowClient:
     # ---------- 内部 ----------
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
+        """请求 RAGFlow；只对幂等请求和可重试故障做有限退避。
+
+        云 embedding 接入后，RAGFlow 仍是唯一检索入口，但其背后多了一跳远程
+        provider。这里不能无限重试，也不能重试上传/解析等有副作用的 POST；只对
+        GET，以及 retrieval 这种无副作用的 POST，在连接错误/429/502/503/504 时重试。
+        """
         url = f"{self.base_url}/api/v1{path}"
-        try:
-            resp = self._session.request(method, url, timeout=self.timeout, **kwargs)
-        except requests.RequestException as e:
-            raise RagflowError(f"RAGFlow 请求失败: {method} {path}", detail=repr(e))
-        if resp.status_code != 200:
-            raise RagflowError(
-                f"RAGFlow 返回 HTTP {resp.status_code}: {method} {path}",
-                detail=resp.text[:500],
-            )
-        try:
-            body = resp.json()
-        except ValueError as e:
-            raise RagflowError("RAGFlow 返回非 JSON 内容", detail=resp.text[:500])
-        # RAGFlow 约定：code=0 成功，非 0 业务失败，message 为错误说明
-        code = body.get("code", -1)
-        if code != 0:
-            raise RagflowError(
-                f"RAGFlow 业务错误(code={code}): {body.get('message', '未知错误')}",
-                detail=f"{method} {path}",
-            )
-        return body.get("data", {})
+        retryable_method = method.upper() == "GET" or path == "/retrieval"
+        last_error = ""
+        for attempt in range(self.retries + 1):
+            try:
+                resp = self._session.request(method, url, timeout=self.timeout, **kwargs)
+            except requests.RequestException as e:
+                last_error = repr(e)
+                if not retryable_method or attempt >= self.retries:
+                    raise RagflowError(f"RAGFlow 请求失败: {method} {path}", detail=last_error)
+                self._sleep_before_retry(method, path, attempt, last_error)
+                continue
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:500]}"
+                if (not retryable_method or resp.status_code not in {429, 502, 503, 504}
+                        or attempt >= self.retries):
+                    raise RagflowError(
+                        f"RAGFlow 返回 HTTP {resp.status_code}: {method} {path}",
+                        detail=resp.text[:500],
+                    )
+                self._sleep_before_retry(method, path, attempt, last_error)
+                continue
+            try:
+                body = resp.json()
+            except ValueError:
+                raise RagflowError("RAGFlow 返回非 JSON 内容", detail=resp.text[:500])
+            # RAGFlow 约定：code=0 成功，非 0 业务失败，message 为错误说明
+            code = body.get("code", -1)
+            if code != 0:
+                raise RagflowError(
+                    f"RAGFlow 业务错误(code={code}): {body.get('message', '未知错误')}",
+                    detail=f"{method} {path}",
+                )
+            return body.get("data", {})
+        raise RagflowError(f"RAGFlow 请求失败: {method} {path}", detail=last_error)
+
+    def _sleep_before_retry(self, method: str, path: str, attempt: int, detail: str) -> None:
+        delay = self.retry_backoff * (2 ** attempt)
+        logger.warning("RAGFlow %s %s 暂时失败，第 %d/%d 次重试前等待 %.1fs: %s",
+                       method, path, attempt + 1, self.retries, delay, detail[:180])
+        if delay:
+            time.sleep(delay)
 
     @staticmethod
     def _norm_chunk(raw: dict) -> dict:
@@ -129,6 +163,60 @@ class RAGFlowClient:
         return chunks
 
     # ---------- dataset 管理 ----------
+
+    def check_embedding_ready(self) -> dict:
+        """检查 RAGFlow 是否有可用的 embedding 模型。
+
+        三态返回，避免误判：
+        - `ready`   ：租户默认 embedding 已指向一个已登记的 provider，可用。
+        - `missing` ：明确不可用（未设置默认模型 / 指向的 provider 没登记），必须让用户去添加。
+        - `local`   ：默认模型是本地 Builtin(TEI) 或裸模型名，无法从 API 判定是否可用；
+                     不阻断，只提示（真不可用时检索会失败，由 diagnose 给出指引）。
+
+        返回 {status, reason, tenant_embd, providers}。
+        """
+        result = {"status": "missing", "reason": "", "tenant_embd": "", "providers": []}
+        try:
+            tenant = self._request("GET", "/users/me/models") or {}
+        except RagflowError as e:
+            result["reason"] = f"无法读取租户模型配置（{e.message}）"
+            return result
+        embd = str(tenant.get("embd_id") or tenant.get("embedding_model") or "")
+        result["tenant_embd"] = embd
+
+        providers: list[str] = []
+        try:
+            body = self._request("GET", "/providers") or {}
+            providers = [str(p.get("name")) for p in (body.get("data") or [])
+                         if isinstance(p, dict) and p.get("name")]
+        except RagflowError:
+            providers = []
+        result["providers"] = providers
+
+        if not embd:
+            result["reason"] = "租户未设置默认 embedding 模型"
+            return result
+
+        # 引用格式：{model}@{instance}@{provider} 或 {model}@{provider}，见架构文档 §11.1
+        parts = embd.rsplit("@", 2)
+        provider = parts[-1].strip() if len(parts) >= 2 else ""
+        if not provider:
+            result["status"] = "local"
+            result["reason"] = (f"默认 embedding 是裸模型名「{embd}」，"
+                                "未指向任何 provider —— 依赖本地 TEI")
+            return result
+        if provider.lower() == "builtin":
+            result["status"] = "local"
+            result["reason"] = f"默认 embedding 指向本地 Builtin（{embd}），依赖本地 TEI"
+            return result
+        if provider not in providers:
+            result["status"] = "missing"
+            result["reason"] = (f"默认 embedding 指向 provider「{provider}」，"
+                                f"但该 provider 未登记（已登记：{providers or '无'}）")
+            return result
+        result["status"] = "ready"
+        result["reason"] = f"已配置：{embd}"
+        return result
 
     def list_datasets(self, page_size: int = 100) -> list[dict]:
         data = self._request("GET", "/datasets", params={"page": 1, "page_size": page_size})

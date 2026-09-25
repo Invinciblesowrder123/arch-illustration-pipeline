@@ -93,9 +93,29 @@ def _data_uri(image_path: str | Path) -> str:
     p = Path(image_path)
     if not p.exists():
         raise VerifyError(f"待审图片不存在: {p}")
+    # 大图先压成 JPEG 再发：上游中转（实测 aixw，2026-09-24）对过大的 image_url
+    # 会静默丢弃图片内容，模型只看到 "image_url omitted"，审稿全部退化为
+    # "未收到插图"的假阴性。阈值取 400KB——1024px PNG 成图普遍 0.7~1.6MB，
+    # 压到 JPEG q85 后 150~300KB，图内文字仍可辨读（实测不受影响）。
+    payload = p.read_bytes()
     mime, _ = mimetypes.guess_type(str(p))
     mime = mime or "image/png"
-    b64 = base64.b64encode(p.read_bytes()).decode()
+    if len(payload) > 400 * 1024:
+        try:
+            import fitz  # PyMuPDF，项目已依赖
+
+            pix = fitz.Pixmap(str(p))
+            if pix.alpha:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            payload = pix.tobytes("jpeg", jpg_quality=85)
+            mime = "image/jpeg"
+            logger.info("待审图片 %.0fKB 超阈值，已压缩为 JPEG %.0fKB 后送审",
+                        p.stat().st_size / 1024, len(payload) / 1024)
+        except Exception as e:  # 压缩失败则原样发送，不阻断审稿
+            logger.warning("图片压缩失败（%s），按原图送审", e)
+            payload = p.read_bytes()
+            mime = mime or "image/png"
+    b64 = base64.b64encode(payload).decode()
     return f"data:{mime};base64,{b64}"
 
 

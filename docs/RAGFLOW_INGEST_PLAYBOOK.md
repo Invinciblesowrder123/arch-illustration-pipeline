@@ -206,7 +206,83 @@ python scripts\ragflow_ingest.py --group papers --include-running --wait --inter
 「连续 15 分钟零完成且仍有 RUNNING」会先补触发，无效则自动重启容器。
 同时**降低瞬时并发**（用 `--wave` 分波），从源头减少 TEI 超时。
 
-## 7. 暂停与恢复（用完机器先让路）
+## 7. 云 embedding 迁移（推荐路径：先试验、后切换）
+
+文章 `ragflow-memory-optimization` 给出的方向是对的：把 embedding 从本地 TEI 挪到云 provider，可以省掉本地常驻模型和一部分 WSL 内存。但这不是“换一个环境变量”这么简单：embedding 模型一旦变化，旧向量和新向量不在同一空间，已有文档必须重新解析/向量化。
+
+本项目采用下面的安全切换策略：
+
+1. **保留正式库**：正式 dataset 继续使用当前 `BAAI/bge-m3@Builtin`，不在生产库上直接改模型。
+2. **在 RAGFlow 模型供应商中配置云 embedding**：完整模型引用按 RAGFlow 实际登记值填写（通常是 `model@instance@provider`），API key 只留在 RAGFlow 的 provider 配置中，不写入 Painter 日志和报告。
+3. **新建试验 dataset**：使用与正式库相同的 chunk 方法；论文库用 `paper`，专著库用 `book`。扫描版仍走 DeepDoc OCR，不因省内存把全部资料强行改成 `naive`。
+4. **只上传 1–3 篇代表文献并解析**：至少覆盖一篇文字层论文、一篇扫描件或图版较多的文献；确认解析成功、向量生成成功、检索能命中正确文献与页码。
+5. **跑检索回归集**：用 `docs/RAGFLOW_ARCHITECTURE.md §5.1` 的典型需求比较旧库与试验库，至少记录 top-3/top-5 命中率、最高相似度、页码正确率和单次检索耗时。
+6. **回归通过后再分批迁移**：正式库不能在切换后“继续沿用旧向量”；要么全量重解析，要么新建云 embedding 正式库并在验收完成后切换 Painter 的 dataset ID。两种方式都要保留旧库作为回退。
+
+Painter 侧的安全约束：
+
+- `.env` 的 `RAGFLOW_EMBEDDING_REF` 只是迁移目标记录，供 `scripts/ragflow_ops.py health --embedding-ref ...` 校验；**不会自动切换 dataset，也不会在每次检索时覆盖 RAGFlow 配置**。
+- `ragflow_client.py` 只对 GET 和 `/retrieval` 的连接异常、429、502、503、504 做有限退避；上传和解析 POST 不重试，避免重复副作用。
+- `scripts/ragflow_ops.py wait` 遇到 `FAIL` 文档返回非零；“没有 RUNNING”不再被误报成“全部成功”。
+- 云 provider 不可达时，`--mode rag` 明确失败并留下诊断；不会无提示混入 `local` 文献，避免破坏引用可溯源性。
+
+### 实测结论（2026-09-26：云 embedding 已在本机跑通）
+
+| 项 | 实测结果 |
+|---|---|
+| provider / 实例 / 模型 | `ZHIPU-AI` / `zhipu-main` / `embedding-3` |
+| 建库用的完整引用 | `embedding-3@zhipu-main@ZHIPU-AI` |
+| 文字层 txt（23KB） | 16 chunks，解析 **5.5s**（其中 embedding 0.79s） |
+| 图版 PDF（2 页） | OCR 1.32s + layout 1.05s，检索命中 **p.2 内容正确** |
+| 检索相似度 | 0.56–0.79（同一试验库，查询越聚焦越高） |
+| 整栈内存 | **约 8.4GB**（无 TEI）；此前带 TEI 约 20.5GB |
+
+试验 dataset（回归用，勿当生产库）：`1f897170b8fb11f1a79dd9ed4560b8ba`（云嵌入试验-embedding3）
+
+一键配置（幂等，只登记 + 验证，不切库、不重解析）：
+
+```powershell
+D:\AI\Painter\.venv\Scripts\python.exe D:\AI\Painter\scripts\ragflow_ops.py embedding-init
+```
+
+> 读 `.env` 的 `ZHIPU_API_KEY`；重复执行会复用已存在的 provider 与实例。
+
+**⚠️ 关掉本地 TEI 必须同时改 `.env`**：编辑 `D:\AI\RAGFlow\ragflow\docker\.env`，
+把 `COMPOSE_PROFILES` 末尾的 `,tei-cpu` 去掉并重启栈。
+
+只停容器、不改这一行是不够的：RAGFlow 靠**容器内** `COMPOSE_PROFILES` 是否含 `tei-`
+来决定 `bge-m3@Builtin` 走本地 TEI 还是走 provider。不改的话报错是
+`HTTPConnectionPool(host='tei', port=80)` 这种 DNS 失败，而不是明确的模型错误，很误导。
+
+**全量迁移成本（现网 187 篇 / 12892 chunks）**
+
+| 维度 | 估算 |
+|---|---|
+| 费用 | 约 660 万 tokens × 0.5 元/百万（智谱官方价；Batch API 0.25）≈ **3 元量级** |
+| 时间 | 瓶颈是本地 CPU 的 DeepDoc 解析/OCR，云端 embedding 只占零点几秒；按历史吞吐（论文组 1.4 篇/分钟、专著组按页数外推）≈ **5–8 小时** |
+| 主要风险 | 云端有 RPM 限流。仍要**分批 20–30 篇**提交，失败用 `status --verbose` 看原因后重跑 |
+
+也就是说：迁移的钱几乎可以忽略，**代价是几个小时的机器时间和一次不可逆的向量空间切换**，
+所以仍然坚持"先试验库回归、再全量"的顺序。
+
+### 7.1 云 embedding 服务商推荐（价格查证于 2026-09，以官方最新公示为准）
+
+| 服务商（RAGFlow factory） | 模型 | 参考价 | 维度 | 什么时候选 |
+|---|---|---|---|---|
+| **ZHIPU-AI** | embedding-3 | 0.5 元/百万 tokens（Batch 0.25） | 2048（256–2048 可调） | **默认推荐**：国内直连、中文效果好、RAGFlow 原生支持。本项目在用 |
+| Tongyi-Qianwen | text-embedding-v4 | 0.6 元/百万 tokens（国内地域） | 1024 默认（64–2048） | 备选：阿里百炼，新账号通常有免费额度 |
+| OpenAI-API-Compatible / VLLM | BAAI/bge-m3 | 随平台；硅基流动等有免费额度 | 1024 | ★**迁移最省事**：与旧库本地 TEI 同模型，同维度时理论上可复用旧向量、免全量重解析 |
+| Jina | jina-embeddings-v3 | 有每月免费额度 | 1024 | 多语种语料；国内直连稳定性不如前两者 |
+| OpenAI | text-embedding-3-small | $0.02/百万 tokens（约 ¥0.14） | 1536 | 仅在合规与网络都可行时考虑；中文表现一般 |
+
+**关于第 3 行（bge-m3）**：旧库现在是本地 TEI 的 `BAAI/bge-m3`（1024 维）。若改用**同名同维度**的
+云端 bge-m3，向量空间理论上一致，**可能不必全量重解析**——这能把 5–8 小时迁移压到接近零。
+但这是"理论成立"，必须先抽样验证：建试验库上传同一篇文档，比较相似度分布与检索命中是否一致，
+确认后再决定是否省掉全量重解析。**没验证前不要直接改正式库。**
+
+>  Prices change. 上表只给量级与选择依据，实际计费以服务商控制台为准。
+
+## 8. 暂停与恢复（用完机器先让路）
 
 入库是长时间 CPU 密集任务（本机实测整栈约占 20GB 内存 / 7-8 核）。需要把机器让给别人时，
 **停容器即可，数据全在命名卷里，不会丢**：

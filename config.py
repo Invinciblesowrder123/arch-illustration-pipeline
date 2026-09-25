@@ -92,6 +92,10 @@ class Config:
     retrieval_sim_threshold: float
     retrieval_page_size: int
     ragflow_timeout: int
+    ragflow_retries: int
+    ragflow_retry_backoff: float
+    # 目标 embedding 仅用于运维校验/迁移记录；不会在每次检索时覆盖 RAGFlow dataset 配置
+    ragflow_embedding_ref: str
 
 
 # 默认服务商：aixw（OpenAI 兼容中转）
@@ -235,6 +239,9 @@ def load_config(
         retrieval_sim_threshold=float(os.environ.get("RETRIEVAL_SIM_THRESHOLD", "0.2")),
         retrieval_page_size=int(os.environ.get("RETRIEVAL_PAGE_SIZE", "12")),
         ragflow_timeout=int(os.environ.get("RAGFLOW_TIMEOUT", "60")),
+        ragflow_retries=_int_env("RAGFLOW_RETRIES", 2, minimum=0),
+        ragflow_retry_backoff=float(os.environ.get("RAGFLOW_RETRY_BACKOFF", "1.5")),
+        ragflow_embedding_ref=os.environ.get("RAGFLOW_EMBEDDING_REF", "").strip(),
     )
     for d in (cfg.refs_dir, cfg.output_dir, cfg.knowledge_dir, cfg.log_dir):
         d.mkdir(parents=True, exist_ok=True)

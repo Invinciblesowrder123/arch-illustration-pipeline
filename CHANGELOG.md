@@ -7,6 +7,50 @@
 
 ## [Unreleased]
 
+### Added（2026-09-26）——缺 embedding 模型时主动提示用户去添加（含服务商推荐）
+
+- **新增 rag 模式预检**：`pipeline._ensure_embedding_ready()` 在检索前检查 RAGFlow 是否有可用的
+  embedding 模型。明确缺失时**立即失败**并给出完整配置指引，而不是让每组查询各报一次晦涩错误。
+- **三态判定**（`ragflow_client.check_embedding_ready()`）：`ready` 放行；`missing` 阻断；
+  `local`（依赖本地 TEI、API 侧判断不了）只警告不阻断 —— 避免误伤正常流程。
+- **新增 `embedding_guide.py`**：服务商推荐表与提示文案的唯一来源，供流水线预检与
+  `ragflow_ops.py health` 共用，避免两处各写一份而走偏。
+- **`health` 增加 embedding 可用性检查**：会打印已登记 provider，缺模型时直接输出服务商
+  推荐与一键接入命令并返回非零。
+- **服务商推荐写入手册**（入库手册 §7.1）：智谱 embedding-3（0.5 元/百万）为默认；
+  阿里 text-embedding-v4（0.6 元/百万）为备选；并指出**云端 bge-m3 与旧库同模型，理论上可
+  复用旧向量、免全量重解析（须先抽样验证）**。价格为 2026-09 查证的公开价，以官方为准。
+- 新增单测 `tests/test_embedding_ready.py`（三态 + 阻断 + 指引内容），全套 **98 项全绿**。
+
+### Added（2026-09-26）——云 embedding 上线：本地 TEI 关闭，改走 ZHIPU-AI
+
+- **embedding 改由云端提供**：RAGFlow 登记 provider `ZHIPU-AI` / 实例 `zhipu-main` / 模型
+  `embedding-3`，建库引用 `embedding-3@zhipu-main@ZHIPU-AI`。实测文字层文档解析 5.5s、
+  图版 PDF 走完 DeepDoc OCR、检索页码正确，相似度 0.56–0.79。
+- **本地 TEI 不再常驻**：整栈内存约 20.5GB → **约 8.4GB**。
+- **`scripts/ragflow_ops.py embedding-init`**：一键登记云 provider + 实例 + 连通验证，幂等；
+  只做登记与验证，不设租户默认模型、不切 dataset、不触发重解析。
+- **`up` / `restart` 新增 `--with-tei`**：需要回退到本地嵌入时临时附带 TEI。
+- **关本地 TEI 的正确姿势写入文档**：必须改 `ragflow/docker/.env` 的 `COMPOSE_PROFILES` 去掉
+  `tei-cpu`；只停容器会让 bge-m3 仍指向 `http://tei:80`，报成 DNS 失败而非模型错误。
+
+### Changed（2026-09-25）——云 embedding 迁移护栏与 RAGFlow 稳定性
+
+- **云 embedding 迁移路径明确化**：embedding 仍由 RAGFlow provider 负责，Painter 不直接生成向量；新增 `RAGFLOW_EMBEDDING_REF` 作为迁移目标记录，仅供 `ragflow_ops.py health --embedding-ref` 校验，不会偷偷切换正式 dataset。
+- **安全迁移约束写入入库手册**：正式库保留旧向量；云 provider 先建试验库、抽样重解析、跑检索回归，确认后再全量重算或切新正式库。扫描版继续走 DeepDoc OCR，不能为省内存把全部文献改成 `naive`。
+- **RAGFlow 检索有限退避**：`ragflow_client.py` 仅对 GET 与 `/retrieval` 的连接异常、429、502、503、504 重试；上传/解析等有副作用的 POST 不重试，避免重复任务。
+- **解析失败不再假绿**：`scripts/ragflow_ops.py wait` 在没有 RUNNING 但存在 FAIL 文档时返回非零。
+- **配置新增**：`RAGFLOW_RETRIES`、`RAGFLOW_RETRY_BACKOFF`、`RAGFLOW_EMBEDDING_REF`。
+
+### Fixed（2026-09-24）——审稿环节"未收到插图"假阴性
+
+- **`verify.py` `_data_uri`：超过 400KB 的待审图自动压成 JPEG（q85）再送审**。
+  根因：上游中转（实测 aixw，2026-09-24）对过大的 `image_url` 会**静默丢弃图片内容**，
+  模型只看到 `image_url omitted`，审稿一律退化为"未收到插图、评分 0"的假阴性
+  （1024px PNG 成图普遍 0.7~1.6MB，正好踩中）。压缩后 150~300KB，图内文字可辨读不受影响。
+  压缩失败时原样发送，不阻断流程。
+- 新增 `scripts/reverify.py`：对已有 run 的成图单独重跑审稿（不重绘图，用于事后复核）。
+
 ### 部署实测更正（2026-09-24）——改写了"16GB 机器跑不动"的结论
 
 - **TEI 常驻内存 17.1GB → 4.98GB，整栈 20.5GB → 约 8.2GB**：bge-m3 那 17GB

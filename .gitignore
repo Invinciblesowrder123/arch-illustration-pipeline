@@ -7,4 +7,6 @@ logs/
 output/
 knowledge/
 references/
+# 论文切片/临时语料目录：同 references/，属语料不入公开仓库
+references_*/
 requirement.txt

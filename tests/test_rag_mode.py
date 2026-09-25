@@ -35,6 +35,7 @@ def _fake_config(mode: str = "rag") -> Config:
         ragflow_base_url="http://ragflow.test", ragflow_api_key="sk-rf",
         ragflow_dataset_ids=["ds1"], retrieval_top_k=5,
         retrieval_sim_threshold=0.2, retrieval_page_size=5, ragflow_timeout=10,
+        ragflow_retries=2, ragflow_retry_backoff=0, ragflow_embedding_ref="",
     )
 
 
@@ -97,6 +98,27 @@ class TestRetrieve(unittest.TestCase):
         self.assertEqual(payload["dataset_ids"], ["ds1"])
         self.assertEqual(payload["knn_top_k"], 2)  # v0.27 起改名为 knn_top_k
         self.assertEqual(payload["similarity_threshold"], 0.2)
+
+    def test_retries_transient_retrieval_http_error(self):
+        client = RAGFlowClient("http://ragflow.test", "sk-rf", timeout=5,
+                               retries=2, retry_backoff=0)
+        client._session = MagicMock()
+        bad = MagicMock(status_code=503, text="temporarily unavailable")
+        good = _ok_response({"chunks": [{"content": "命中", "document_name": "a.pdf",
+                                           "page_number": 1, "similarity": 0.8}]})
+        client._session.request.side_effect = [bad, bad, good]
+        chunks = client.retrieve("q", ["ds1"])
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(client._session.request.call_count, 3)
+
+    def test_does_not_retry_upload_or_parse_style_post(self):
+        client = _client()
+        client._session = MagicMock()
+        resp = MagicMock(status_code=503, text="temporarily unavailable")
+        client._session.request.return_value = resp
+        with self.assertRaises(RagflowError):
+            client._request("POST", "/datasets/ds1/documents/parse", json={"document_ids": ["d1"]})
+        self.assertEqual(client._session.request.call_count, 1)
 
     def test_business_error_raises(self):
         client = _client()

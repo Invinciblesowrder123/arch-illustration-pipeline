@@ -127,6 +127,10 @@ Authorization: Bearer {RAGFLOW_API_KEY}
 
 ### 10.1 嵌入模型不再内置在 ragflow 镜像里（影响机器选型）
 
+> **当前架构边界（2026-09-25）**：embedding 的执行位置属于 RAGFlow provider 层，不属于 Painter。无论使用本地 TEI 还是云端 provider，文档入库向量化和 `/retrieval` 的 query embedding 都由 RAGFlow 完成；Painter 只负责查询规划、发送 `question`、消费带页码的 chunks。把 embedding API 直接塞进 `knowledge.py` 会形成第二套检索后端，当前不采用。
+>
+> **模型迁移不可无损复用旧向量**：更换 embedding 模型/provider 后，旧向量与新向量不在同一向量空间，已有文档必须重新解析/向量化。正式迁移采用“新建试验 dataset → 抽样回归 → 全量重算或切换新 dataset → 保留旧库回退”的顺序。
+
 架构文档 §5 原假设"嵌入模型中文首选 BAAI/bge-m3（RAGFlow 内置）"。v0.27.2 已改为
 **独立 TEI 容器**（`infiniflow/text-embeddings-inference:cpu-1.8`，11GB 镜像，
 内含 bge-m3 与 Qwen3-Embedding-0.6B），需要：
@@ -207,3 +211,39 @@ command: ["--model-id", "/data/${TEI_MODEL}", "--auto-truncate",
 - `python main.py --dry-run --mode rag`：真机检索命中，片段带正确页码与相似度。
 - mock 单测 31 项全绿。
 - **待办**：教授侧 215 篇真实语料入库后重跑验收，并做 §5.1 的 chunking/embedding 调优。
+
+## 11. 云 embedding 上线实测（2026-09-26）
+
+**已在本机跑通**：embedding 改由云端 ZHIPU-AI 提供，本地 TEI 不再启动。
+
+| 项 | 值 |
+|---|---|
+| provider / 实例 / 模型 | `ZHIPU-AI` / `zhipu-main` / `embedding-3` |
+| 建库引用 | `embedding-3@zhipu-main@ZHIPU-AI` |
+| 整栈内存 | 约 8.4GB（无 TEI），此前约 20.5GB |
+
+### 11.1 模型引用的格式（源码口径）
+
+`api/db/joint_services/tenant_model_service.py::split_model_name` 用 `rsplit("@", 2)`，
+格式是 `{model}@{instance}@{provider}`；两段式 `{model}@{provider}` 时 instance 记作 `default`，
+且当该 provider 只有一个活跃实例时会回退到它（日志有 warning）。
+
+### 11.2 本地 TEI 的判定条件（坑）
+
+`is_tei_builtin_embedding` 要求**容器内** `COMPOSE_PROFILES` 含 `tei-`、模型名等于 `TEI_MODEL`、
+provider 为 `Builtin` 或空。因此：
+
+- 只在命令行覆盖 profile、不删 `.env` 里的 `tei-cpu` → 容器没起 TEI，但代码仍把 bge-m3 指向
+  `http://tei:80` → 报 `NameResolutionError` / `HTTPConnectionPool(host='tei')`，非常误导。
+- 正确做法：改 `D://AI//RAGFlow//ragflow//docker//.env` 的 `COMPOSE_PROFILES` 去掉 `tei-cpu` 再重启。
+
+### 11.3 旧 bge-m3 库在无 TEI 下的行为
+
+检索报 `LookupError('Provider  not found for model BAAI/bge-m3.')` —— **明确失败**，
+不会像以前那样长时间挂住。这也意味着旧库与新 embedding **不能共存**：
+旧库要么重解析到云模型，要么临时用 `up --with-tei` 拉回本地 TEI。
+
+### 11.4 边界不变
+
+扫描件继续走 DeepDoc OCR（实测 OCR 1.32s + layout 1.05s，检索页码正确）；
+Painter 不直接调用任何 embedding API，向量仍由 RAGFlow provider 层负责。

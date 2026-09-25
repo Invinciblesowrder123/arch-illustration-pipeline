@@ -44,6 +44,7 @@ def _fake_config(mode: str = "rag", tmp: Path | None = None) -> Config:
         ragflow_base_url="http://ragflow.test", ragflow_api_key="sk-rf",
         ragflow_dataset_ids=["ds1"], retrieval_top_k=5,
         retrieval_sim_threshold=0.2, retrieval_page_size=5, ragflow_timeout=10,
+        ragflow_retries=2, ragflow_retry_backoff=0, ragflow_embedding_ref="",
     )
 
 
