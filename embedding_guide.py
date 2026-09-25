@@ -32,11 +32,13 @@ PROVIDER_RECOMMENDATIONS: list[dict[str, str]] = [
     {
         "factory": "OpenAI-API-Compatible / VLLM",
         "model": "BAAI/bge-m3",
-        "price": "随平台而定；硅基流动等有免费额度（以平台公示为准）",
+        "price": "硅基流动官方定价页列为「免费」（输入输出均免）；另有付费的 Pro/BAAI/bge-m3",
         "dim": "1024",
         "when": "★ 迁移省事：与旧库本地 TEI 同一个模型，同维度时**理论上可复用旧向量、免全量重解析**"
-                "（仍需抽样验证相似度分布再决定）。通过 OpenAI 兼容接口接入。",
-        "url": "https://siliconflow.cn",
+                "（仍需抽样验证相似度分布再决定）。通过 OpenAI 兼容接口接入。\n"
+                "     ⚠ 「免费」是平台列的免费模型，不是合同保障：有过模型被移出免费名单的先例，"
+                "免费版也有限速，大批量入库仍要分批。",
+        "url": "https://siliconflow.cn/pricing",
     },
     {
         "factory": "Jina",
