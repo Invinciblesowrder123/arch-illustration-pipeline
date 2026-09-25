@@ -254,6 +254,17 @@ D:\AI\Painter\.venv\Scripts\python.exe D:\AI\Painter\scripts\ragflow_ops.py embe
 来决定 `bge-m3@Builtin` 走本地 TEI 还是走 provider。不改的话报错是
 `HTTPConnectionPool(host='tei', port=80)` 这种 DNS 失败，而不是明确的模型错误，很误导。
 
+**2026-09-26 已彻底清理本地 embedding**：TEI 镜像（`infiniflow/text-embeddings-inference:cpu-1.8`，
+**11GB**，模型 bge-m3 打包在镜像内，无独立模型文件/无 volume）已删除，磁盘释放约 11GB。
+删除后 RAGFlow 与全部知识库检索正常（云端 bge-m3 接管）。
+
+要恢复本地方案时**重新拉镜像即可**（约 11GB，慢）：
+
+```powershell
+docker pull infiniflow/text-embeddings-inference:cpu-1.8
+# 然后把 .env 的 COMPOSE_PROFILES 末尾加回 ,tei-cpu，再 up
+```
+
 > **⚠️ 这段估算已被 2026-09-26 实测推翻（针对"换成 bge-m3"这一路线）**：
 > 实测证明本地 TEI 与云端 `BAAI/bge-m3` 向量**数值等价**，切换只需改 dataset 的
 > `embedding_model` 引用，**不重解析、约 1 分钟、费用 0**。见架构文档 §11.5。
