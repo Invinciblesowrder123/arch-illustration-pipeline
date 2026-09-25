@@ -254,7 +254,12 @@ D:\AI\Painter\.venv\Scripts\python.exe D:\AI\Painter\scripts\ragflow_ops.py embe
 来决定 `bge-m3@Builtin` 走本地 TEI 还是走 provider。不改的话报错是
 `HTTPConnectionPool(host='tei', port=80)` 这种 DNS 失败，而不是明确的模型错误，很误导。
 
-**全量迁移成本（现网 187 篇 / 12892 chunks）**
+> **⚠️ 这段估算已被 2026-09-26 实测推翻（针对"换成 bge-m3"这一路线）**：
+> 实测证明本地 TEI 与云端 `BAAI/bge-m3` 向量**数值等价**，切换只需改 dataset 的
+> `embedding_model` 引用，**不重解析、约 1 分钟、费用 0**。见架构文档 §11.5。
+> 只有**换成不同模型**（如 embedding-3）时，下面这张表的重解析成本才成立。
+
+**全量迁移成本（换成不同模型时：现网 187 篇 / 12892 chunks）**
 
 | 维度 | 估算 |
 |---|---|
@@ -271,7 +276,7 @@ D:\AI\Painter\.venv\Scripts\python.exe D:\AI\Painter\scripts\ragflow_ops.py embe
 |---|---|---|---|---|
 | **ZHIPU-AI** | embedding-3 | 0.5 元/百万 tokens（Batch 0.25） | 2048（256–2048 可调） | **默认推荐**：国内直连、中文效果好、RAGFlow 原生支持。本项目在用 |
 | Tongyi-Qianwen | text-embedding-v4 | 0.6 元/百万 tokens（国内地域） | 1024 默认（64–2048） | 备选：阿里百炼，新账号通常有免费额度 |
-| OpenAI-API-Compatible / VLLM | BAAI/bge-m3 | **硅基流动官方定价页列为「免费」**（输入输出均免，但需实名 + 余额非负，见下） | 1024 | ★**迁移最省事**：与旧库本地 TEI 同模型，同维度时理论上可复用旧向量、免全量重解析 |
+| OpenAI-API-Compatible / VLLM | BAAI/bge-m3 | **硅基流动官方定价页列为「免费」**（输入输出均免，但需实名 + 余额非负，见下） | 1024 | ★**迁移最省事（已实测）**：与旧库本地 TEI 同模型，向量等价，改引用即可免重解析 |
 | Jina | jina-embeddings-v3 | 有每月免费额度 | 1024 | 多语种语料；国内直连稳定性不如前两者 |
 | OpenAI | text-embedding-3-small | $0.02/百万 tokens（约 ¥0.14） | 1536 | 仅在合规与网络都可行时考虑；中文表现一般 |
 

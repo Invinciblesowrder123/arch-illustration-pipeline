@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+### Changed（2026-09-26）——★ 旧库免重解析复活：本地 TEI → 云端 BAAI/bge-m3
+
+推翻了此前"换 embedding 必须全量重解析（5–8 小时）"的判断——那只适用于**换不同模型**。
+
+- **实测证明向量等价**：demo 库（本地 TEI bge-m3 旧向量）改指向云端 bge-m3 后，与同篇新建的
+  云端库严格对照，4 组查询 top1 相似度差 ≤0.0001、命中页码完全一致，平均 0.5279 vs 0.5279。
+  另实测 `BAAI/bge-m3` 与 `Pro/BAAI/bge-m3` 余弦相似度 = 1.000000（同一模型，Pro 只是速率档位）。
+- **已切换（不重解析、零成本、约 1 分钟）**：考古文献库（165 篇 / 9971 chunks）、
+  考古专著（21 / 2892）、demo 库、租户默认 → `BAAI/bge-m3@siliconflow@OpenAI-API-Compatible`。
+  165 篇正式库检索已验证正常（相似度 0.40–0.67，命中文档与页码对题）。
+- **回退**：把 `embedding_model` 改回 `BAAI/bge-m3@Builtin` 并 `up --with-tei`，向量本身未改动。
+- `ragflow_ops.py embedding-init` 的 key 读取改为按服务商回退
+  （`SILICONFLOW_API_KEY` / `ZHIPU_API_KEY` / `EMBEDDING_API_KEY`），接新服务商不必改脚本。
+- 文档：架构 §11.5 记录对照实验与结论；手册标注旧的重解析成本估算仅在换模型时成立。
+
 ### Added（2026-09-26）——缺 embedding 模型时主动提示用户去添加（含服务商推荐）
 
 - **新增 rag 模式预检**：`pipeline._ensure_embedding_ready()` 在检索前检查 RAGFlow 是否有可用的

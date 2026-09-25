@@ -285,9 +285,14 @@ def cmd_embedding_init(args):
     边界：只做登记与验证。不设租户默认模型、不切换任何 dataset、不触发已有文档重解析，
     因此不会让旧向量与新模型混用，也不会悄悄产生批量 embedding 费用。
     """
-    api_key = (args.api_key or os.environ.get("ZHIPU_API_KEY", "")).strip()
+    # 按服务商依次回退找 key，接新服务商时不必再改脚本。
+    api_key = (args.api_key
+               or os.environ.get("SILICONFLOW_API_KEY", "")
+               or os.environ.get("ZHIPU_API_KEY", "")
+               or os.environ.get("EMBEDDING_API_KEY", "")).strip()
     if not api_key:
-        raise SystemExit("缺少 API key：用 --api-key 传入，或设置环境变量 ZHIPU_API_KEY")
+        raise SystemExit("缺少 API key：用 --api-key 传入，或在 .env 设置 "
+                         "SILICONFLOW_API_KEY / ZHIPU_API_KEY / EMBEDDING_API_KEY")
     provider, model, instance = args.provider, args.model, args.instance
     print(f"provider={provider}  model={model}  instance={instance}  key={_mask(api_key)}")
 
